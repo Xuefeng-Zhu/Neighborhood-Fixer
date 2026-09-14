@@ -2,11 +2,13 @@ import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ChevronDown, FlaskConical, Clock, RotateCcw } from 'lucide-react';
-import { post, request, humanize } from '../lib/api';
+import { humanize } from '../lib/api';
+import { useApi } from '../lib/api-context';
 import type { Incident } from '../lib/api';
 import { ErrorMessage } from './ui';
 import { useSession } from '../lib/session';
 export function DemoPanel() {
+  const { request, post } = useApi();
   const { session, health } = useSession();
   const client = useQueryClient();
   const navigate = useNavigate();

@@ -14,6 +14,7 @@ from .config import Settings
 from .store import create_store
 from .models import Observation, Analysis, Approval, SubmissionAttempt
 from . import fixtures
+from .policy import Policy
 
 CATEGORY_TITLES = {
     "damaged_sidewalk": "Damaged sidewalk or curb ramp",
@@ -86,7 +87,7 @@ def cells(lat, lon):
     return (math.floor(lat / 0.001), math.floor(lon / 0.001))
 
 
-class Domain:
+class Domain(Policy):
     def __init__(self, settings=None, store=None):
         self.settings = settings or Settings()
         self.store = store or create_store(self.settings)
@@ -107,6 +108,7 @@ class Domain:
         return record
 
     def owner(self, item, principal):
+        self.writable_incident(item)
         if item["owner_id"] != principal["user"]["id"]:
             raise DomainError(
                 "FORBIDDEN",
@@ -164,6 +166,7 @@ class Domain:
                 tx.put("notification:" + sub["user_id"], notification_id, item)
 
     def subscribe(self, tx, incident_id, user_id, following=True):
+        self.writable_incident(self.require(tx, "incident", incident_id))
         sub_id = incident_id + "_" + user_id
         existing = tx.get("subscription", sub_id)
         if following and not (existing and existing["following"]):
@@ -227,7 +230,15 @@ class Domain:
         return {"user": user, "workspace_id": workspace_id, "mode": self.settings.mode}
 
     def seed(self, tx):
-        case_id = ident()
+        generation = (
+            self.settings.data_generation if self.settings.mode == "aws" else "local"
+        )
+        case_id = uuid.uuid5(
+            uuid.NAMESPACE_URL, f"{tx.workspace_id}:{generation}:sample-pothole"
+        ).hex
+        if tx.get("incident", case_id):
+            return case_id
+        observation_id = uuid.uuid5(uuid.NAMESPACE_URL, case_id + ":observation").hex
         now = iso(self.now(tx))
         item = {
             "id": case_id,
@@ -242,16 +253,41 @@ class Domain:
             "resolution_status": "UNVERIFIED",
             "submission_status": "PREPARED",
             "observation_count": 1,
-            "observation_ids": [],
+            "observation_ids": [observation_id],
             "shared_public": True,
             "version": 1,
             "created_at": now,
             "updated_at": now,
             "seeded": True,
+            "is_sample": True,
             "cell": list(cells(47.6154, -122.3354)),
             "next_action": "A nearby but distinct illustrative issue.",
         }
         tx.put("incident", case_id, item)
+        tx.put(
+            "observation",
+            observation_id,
+            {
+                "id": observation_id,
+                "owner_id": "fixture",
+                "incident_id": case_id,
+                "description": item["description"],
+                "category": "pothole",
+                "latitude": item["latitude"],
+                "longitude": item["longitude"],
+                "location_label": item["location_label"],
+                "location_confirmed": True,
+                "asset_public": "yes",
+                "evidence_ids": [],
+                "share_public": True,
+                "share_evidence": False,
+                "version": 1,
+                "created_at": now,
+                "updated_at": now,
+                "analysis": None,
+                "is_sample": True,
+            },
+        )
         tx.put(
             "geo:" + ":".join(map(str, item["cell"])), case_id, {"incident_id": case_id}
         )
@@ -261,6 +297,7 @@ class Domain:
             "ILLUSTRATION",
             "Illustrative fixture created; no report has been sent.",
         )
+        return case_id
 
     def evidence(self, tx, evidence_id, principal, allow_public=False):
         evidence = self.require(tx, "evidence", evidence_id)
@@ -287,9 +324,16 @@ class Domain:
             )
         return [self.evidence(tx, eid, principal) for eid in evidence_ids]
 
-    def create_observation(self, principal, data):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+    def create_observation(self, principal, data, idempotency_key=None):
+        with self.authorized(principal) as tx:
+            self.check_admission(tx, principal)
+            request_id, request = self.request_record(
+                tx, principal, "report", idempotency_key, digest(data)
+            )
+            if request:
+                return request["response"]
             self.check_evidence(tx, data["evidence_ids"], principal)
+            self.consume_quota(tx, principal, "reports")
             now = iso(self.now(tx))
             item = Observation(
                 **data,
@@ -300,10 +344,20 @@ class Domain:
                 updated_at=now,
             ).model_dump(mode="json")
             tx.put("observation", item["id"], item)
+            if request_id:
+                tx.put(
+                    "request",
+                    request_id,
+                    {
+                        "body_hash": digest(data),
+                        "status": "completed",
+                        "response": item,
+                    },
+                )
             return item
 
     def patch_observation(self, principal, observation_id, data):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             obs = self.require(tx, "observation", observation_id)
             self.owner(obs, principal)
             if obs.get("incident_id"):
@@ -326,12 +380,33 @@ class Domain:
             return obs
 
     def enqueue(self, tx, kind, payload, principal, due_at=None):
+        self.check_admission(tx, principal)
+        reasoning = kind in ("analyze", "decide")
+        deduplicated = kind in ("analyze", "decide")
+        request_id = (
+            digest([principal["user"]["id"], kind, payload]) if deduplicated else None
+        )
+        if request_id:
+            # Retain the legacy record kind so in-flight distinct-issue decisions
+            # remain idempotent across deployments.
+            previous = tx.get("reasoning_request", request_id)
+            if previous:
+                operation = tx.get("operation", previous["operation_id"])
+                if operation and operation["status"] in (
+                    "pending",
+                    "running",
+                    "completed",
+                ):
+                    return operation["id"]
+        if reasoning:
+            self.consume_quota(tx, principal, "reasoning")
         op = ident()
         job = {
             "id": op,
             "kind": kind,
             "payload": payload,
             "principal": principal,
+            "generation": principal.get("generation"),
             "status": "pending",
             "due_at": due_at or self.now(tx),
             "attempts": 0,
@@ -340,6 +415,8 @@ class Domain:
         }
         tx.put("job", op, job)
         tx.put("pending_job", op, {"job_id": op})
+        if request_id:
+            tx.put("reasoning_request", request_id, {"operation_id": op})
         if payload.get("incident_id"):
             tx.put("incident_jobs:" + payload["incident_id"], op, {"job_id": op})
         tx.put(
@@ -357,7 +434,7 @@ class Domain:
         return op
 
     def start_analysis(self, principal, observation_id):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             obs = self.require(tx, "observation", observation_id)
             self.owner(obs, principal)
             op = self.enqueue(
@@ -380,7 +457,7 @@ class Domain:
                 nearby.extend(tx.list(f"geo:{cell[0] + dx}:{cell[1] + dy}", limit=100))
         for index in nearby:
             inc = tx.get("incident", index["incident_id"])
-            if not inc:
+            if not inc or inc.get("is_sample") or inc.get("seeded"):
                 continue
             other = inc.get("cell", cells(inc["latitude"], inc["longitude"]))
             if (
@@ -418,14 +495,36 @@ class Domain:
         return sorted(result, key=lambda c: c["distance_meters"])[:8]
 
     def decide(self, principal, observation_id, incident_id, different_issue):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             obs = self.require(tx, "observation", observation_id)
             self.owner(obs, principal)
-            if obs.get("incident_id"):
-                op = self.enqueue(
-                    tx, "already_linked", {"incident_id": obs["incident_id"]}, principal
+            if bool(incident_id) == bool(different_issue):
+                raise DomainError(
+                    "DECISION_REQUIRED",
+                    "Choose an existing case or confirm that this is a different issue.",
                 )
-                return op
+            payload = {
+                "observation_id": observation_id,
+                # None is the explicit different-issue outcome after the XOR check.
+                "incident_id": incident_id,
+                "version": obs["version"],
+            }
+            request_id = digest([principal["user"]["id"], "decide", payload])
+            previous = tx.get("reasoning_request", request_id)
+            if previous:
+                operation = tx.get("operation", previous["operation_id"])
+                if operation and operation["status"] in (
+                    "pending",
+                    "running",
+                    "completed",
+                ):
+                    return operation["id"]
+            if obs.get("incident_id"):
+                raise DomainError(
+                    "OBSERVATION_LINKED",
+                    "This observation is already linked. Revise the report draft or add another observation.",
+                    409,
+                )
             if not obs.get("analysis"):
                 raise DomainError(
                     "ANALYSIS_REQUIRED", "Complete the observations review first.", 409
@@ -435,11 +534,6 @@ class Domain:
                     "CLARIFICATION_REQUIRED",
                     "Answer the location and public-access questions before continuing.",
                     409,
-                )
-            if bool(incident_id) == bool(different_issue):
-                raise DomainError(
-                    "DECISION_REQUIRED",
-                    "Choose an existing case or confirm that this is a different issue.",
                 )
             if incident_id and incident_id not in [
                 c["id"] for c in self.candidates(tx, obs, principal)
@@ -452,17 +546,13 @@ class Domain:
             op = self.enqueue(
                 tx,
                 "decide",
-                {
-                    "observation_id": observation_id,
-                    "incident_id": incident_id,
-                    "version": obs["version"],
-                },
+                payload,
                 principal,
             )
         return op
 
     def unlink_observation(self, principal, observation_id):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             obs = self.require(tx, "observation", observation_id)
             self.owner(obs, principal)
             if not obs.get("incident_id"):
@@ -479,7 +569,11 @@ class Domain:
             inc["version"] += 1
             inc["updated_at"] = iso(self.now(tx))
             tx.put("incident", inc["id"], inc)
-            obs["incident_id"] = None
+            obs.update(
+                incident_id=None,
+                version=obs["version"] + 1,
+                updated_at=iso(self.now(tx)),
+            )
             tx.put("observation", obs["id"], obs)
             for eid in obs["evidence_ids"]:
                 e = self.require(tx, "evidence", eid)
@@ -516,9 +610,11 @@ class Domain:
             "updated_at",
             "version",
             "next_action",
+            "is_sample",
         )
         result = {k: incident.get(k) for k in keys}
         result.update(
+            is_sample=bool(incident.get("is_sample") or incident.get("seeded")),
             latitude=round(incident["latitude"], 3),
             longitude=round(incident["longitude"], 3),
             owner_id="",
@@ -532,6 +628,17 @@ class Domain:
             )
         return result
 
+    def incident_projection(self, incident, principal, is_member):
+        result = self.public_projection(incident)
+        if is_member:
+            result["owner_id"] = incident["owner_id"]
+        if incident["owner_id"] == principal["user"]["id"]:
+            result.update(
+                latitude=incident["latitude"],
+                longitude=incident["longitude"],
+            )
+        return result
+
     def list_incidents(
         self,
         principal,
@@ -541,7 +648,7 @@ class Domain:
         following=False,
         cursor=None,
     ):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             items = []
             last = cursor
             # Bounded keyset read; a page may contain fewer matches after filtering.
@@ -585,29 +692,18 @@ class Domain:
                     inc["submission_status"],
                 ):
                     continue
-                item = self.public_projection(inc)
-                if is_member:
-                    item.update(
-                        owner_id=inc["owner_id"],
-                        latitude=inc["latitude"],
-                        longitude=inc["longitude"],
-                    )
+                item = self.incident_projection(inc, principal, is_member)
                 item["following"] = is_following
                 items.append(item)
             return {"items": items, "next_cursor": last if len(source) > 50 else None}
 
     def incident_detail(self, principal, incident_id):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             inc = self.require(tx, "incident", incident_id)
             self.accessible(tx, inc, principal)
             is_owner = inc["owner_id"] == principal["user"]["id"]
-            result = self.public_projection(inc)
-            if self.member(tx, inc, principal):
-                result.update(
-                    owner_id=inc["owner_id"],
-                    latitude=inc["latitude"],
-                    longitude=inc["longitude"],
-                )
+            is_member = self.member(tx, inc, principal)
+            result = self.incident_projection(inc, principal, is_member)
             observations = []
             for oid in inc["observation_ids"]:
                 obs = tx.get("observation", oid)
@@ -660,13 +756,16 @@ class Domain:
                     if e:
                         item["evidence"] = self.evidence_projection(e, public=not own)
                 verifications.append(item)
+            routing = inc.get("routing")
+            if routing and not is_owner:
+                routing = {k: v for k, v in routing.items() if k != "agent_activity"}
             result.update(
                 observations=observations,
                 verifications=verifications,
                 events=events,
                 is_owner=is_owner,
-                analysis=inc.get("analysis"),
-                routing=inc.get("routing"),
+                analysis=inc.get("analysis") if is_owner else None,
+                routing=routing,
                 agent_activity=[e for e in events if e.get("tool")],
                 following=bool(
                     (
@@ -677,12 +776,13 @@ class Domain:
                     ).get("following")
                 ),
             )
-            for phase in (
-                inc.get("analysis") or {},
-                inc.get("routing") or {},
-                inc.get("coordinator") or {},
-            ):
-                result["agent_activity"].extend(phase.get("agent_activity", []))
+            if is_owner:
+                for phase in (
+                    inc.get("analysis") or {},
+                    inc.get("routing") or {},
+                    inc.get("coordinator") or {},
+                ):
+                    result["agent_activity"].extend(phase.get("agent_activity", []))
             if is_owner and inc.get("draft_id"):
                 result["draft"] = self.draft_projection(
                     self.require(tx, "draft", inc["draft_id"])
@@ -812,13 +912,13 @@ class Domain:
         return draft
 
     def create_draft(self, principal, incident_id, data):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             inc = self.require(tx, "incident", incident_id)
             self.owner(inc, principal)
             return self.draft_projection(self.make_draft(tx, inc, principal, data))
 
     def approve(self, principal, incident_id, data):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             inc = self.require(tx, "incident", incident_id)
             self.owner(inc, principal)
             draft = self.require(tx, "draft", data["draft_id"])
@@ -960,7 +1060,7 @@ class Domain:
             return op
 
     def cancel(self, principal, incident_id):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             inc = self.require(tx, "incident", incident_id)
             self.owner(inc, principal)
             attempt = tx.get("attempt", inc.get("attempt_id", ""))
@@ -992,7 +1092,7 @@ class Domain:
             return {"cancelled": True}
 
     def reconcile(self, principal, incident_id):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             inc = self.require(tx, "incident", incident_id)
             self.owner(inc, principal)
             if inc["submission_status"] != "OUTCOME_UNKNOWN":
@@ -1009,8 +1109,9 @@ class Domain:
             )
 
     def verification(self, principal, incident_id, data):
-        with self.store.atomic(principal["workspace_id"]) as tx:
+        with self.authorized(principal) as tx:
             inc = self.require(tx, "incident", incident_id)
+            self.writable_incident(inc)
             self.accessible(tx, inc, principal)
             if data.get("evidence_id"):
                 self.evidence(tx, data["evidence_id"], principal)
@@ -1056,6 +1157,7 @@ class Domain:
 
     def claim_job(self, workspace_id, job_id=None):
         with self.store.atomic(workspace_id) as tx:
+            self.check_admission(tx)
             now = self.now(tx)
             jobs = (
                 [tx.get("job", job_id)]
@@ -1073,6 +1175,16 @@ class Domain:
                     or job["lease_until"] > now
                 ):
                     continue
+                self.check_admission(tx, job["principal"])
+                if (
+                    self.settings.mode == "aws"
+                    and job.get("generation") != self.settings.data_generation
+                ):
+                    raise DomainError(
+                        "STALE_GENERATION",
+                        "This job belongs to an earlier demo generation.",
+                        409,
+                    )
                 if job["status"] == "running" and job["kind"] == "submit":
                     attempt = self.require(tx, "attempt", job["payload"]["attempt_id"])
                     if attempt.get("write_started"):
@@ -1119,7 +1231,7 @@ class Domain:
             return False
         try:
             result = await self.execute_job(workspace_id, job)
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job, settlement=True) as tx:
                 current = self.require(tx, "job", job["id"])
                 if current.get("lease_owner") != job["lease_owner"]:
                     return True
@@ -1136,7 +1248,7 @@ class Domain:
                 if isinstance(exc, DomainError)
                 else "The operation failed. Review configuration or retry; no fixture fallback was used."
             )
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job, settlement=True) as tx:
                 current = self.require(tx, "job", job["id"])
                 if current.get("lease_owner") != job["lease_owner"]:
                     return True
@@ -1201,7 +1313,7 @@ class Domain:
         if kind == "already_linked":
             return payload
         if kind == "analyze":
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 obs = self.require(tx, "observation", payload["observation_id"])
                 self.owner(obs, p)
                 evidence = self.check_evidence(tx, obs["evidence_ids"], p)
@@ -1214,10 +1326,20 @@ class Domain:
             required = fixtures.analyze(obs, evidence, candidates, p)[
                 "missing_information"
             ]
-            analysis["missing_information"] = list(
-                dict.fromkeys(analysis["missing_information"] + required)
+            # The service owns the complete list of resident facts required to
+            # proceed. Model-suggested questions can preserve uncertainty, but
+            # cannot create an extra blocking gate (for example, asking the
+            # resident to confirm a duplicate before the duplicate decision UI).
+            model_only_questions = [
+                question
+                for question in analysis["missing_information"]
+                if question not in required
+            ]
+            analysis["unknowns"] = list(
+                dict.fromkeys(analysis["unknowns"] + model_only_questions)
             )
-            with self.store.atomic(workspace_id) as tx:
+            analysis["missing_information"] = required
+            with self.job_transaction(workspace_id, job) as tx:
                 current = self.require(tx, "observation", obs["id"])
                 if current["version"] != payload["version"]:
                     raise DomainError(
@@ -1229,7 +1351,7 @@ class Domain:
                 tx.put("observation", current["id"], current)
             return {"analysis": analysis, "duplicate_candidates": candidates}
         if kind == "decide":
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 obs = self.require(tx, "observation", payload["observation_id"])
                 self.owner(obs, p)
                 if obs.get("incident_id"):
@@ -1260,12 +1382,14 @@ class Domain:
                         "unresolved_questions": trusted["unresolved_questions"]
                         or ["The agent route does not match trusted configuration."],
                     }
+            with self.job_transaction(workspace_id, job):
+                pass
             proposal = (
                 await asyncio.to_thread(self.engine().prepare, obs, routing, p)
                 if routing and routing.get("supported")
                 else None
             )
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 obs = self.require(tx, "observation", obs["id"])
                 if obs.get("incident_id"):
                     return {"incident_id": obs["incident_id"]}
@@ -1413,11 +1537,11 @@ class Domain:
         if kind == "reconcile":
             from services.worker.browser import lookup_receipt
 
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 attempt = self.require(tx, "attempt", payload["attempt_id"])
             receipt = await lookup_receipt(attempt["id"])
             if receipt:
-                with self.store.atomic(workspace_id) as tx:
+                with self.job_transaction(workspace_id, job) as tx:
                     self.record_receipt(tx, attempt, receipt, job)
                 return {
                     "incident_id": attempt["incident_id"],
@@ -1431,11 +1555,11 @@ class Domain:
         if kind == "check_status":
             from services.worker.browser import get_ticket_status
 
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 inc = self.require(tx, "incident", payload["incident_id"])
                 ticket = self.require(tx, "ticket", inc["ticket_id"])
             status = await get_ticket_status(ticket["receipt_id"])
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 self.record_status(tx, inc["id"], status, job["id"])
                 if (
                     status.get("normalized_status") != "CLOSED"
@@ -1491,7 +1615,7 @@ class Domain:
             FailedBeforeSubmission,
         )
 
-        with self.store.atomic(workspace_id) as tx:
+        with self.job_transaction(workspace_id, job) as tx:
             attempt = self.require(tx, "attempt", job["payload"]["attempt_id"])
             inc = self.require(tx, "incident", attempt["incident_id"])
             approval = self.require(tx, "approval", attempt["approval_id"])
@@ -1556,7 +1680,7 @@ class Domain:
             )
 
         def before_write():
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 active = self.require(tx, "attempt", attempt["id"])
                 current = self.require(tx, "incident", inc["id"])
                 approval = self.require(tx, "approval", active["approval_id"])
@@ -1598,7 +1722,7 @@ class Domain:
                 before_write=before_write,
             )
         except OutcomeUnknown:
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 self.mark_unknown(
                     tx,
                     attempt,
@@ -1612,7 +1736,7 @@ class Domain:
                 if isinstance(exc, HandoffRequired)
                 else "FAILED_BEFORE_SUBMISSION"
             )
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 current_attempt = self.require(tx, "attempt", attempt["id"])
                 if current_attempt["status"] == "CANCELLED":
                     return {"incident_id": inc["id"], "submission_status": "CANCELLED"}
@@ -1633,7 +1757,7 @@ class Domain:
                 )
             return {"incident_id": inc["id"], "submission_status": state}
         except BaseException:
-            with self.store.atomic(workspace_id) as tx:
+            with self.job_transaction(workspace_id, job) as tx:
                 self.mark_unknown(
                     tx,
                     attempt,
@@ -1641,7 +1765,7 @@ class Domain:
                     "An unexpected browser interruption left the outcome uncertain. No automatic retry was sent.",
                 )
             return {"incident_id": inc["id"], "submission_status": "OUTCOME_UNKNOWN"}
-        with self.store.atomic(workspace_id) as tx:
+        with self.job_transaction(workspace_id, job, settlement=True) as tx:
             self.record_receipt(tx, attempt, receipt, job)
         return {
             "incident_id": inc["id"],
@@ -1750,6 +1874,12 @@ class Domain:
             inc["id"],
             "One agency report was received. Everyone follows the same ticket.",
         )
+        try:
+            self.check_admission(tx, job["principal"])
+        except DomainError:
+            # Persist a known receipt while maintenance drains existing workers;
+            # no fresh status action is admitted. Reset must await that drain.
+            return
         self.enqueue(
             tx,
             "check_status",

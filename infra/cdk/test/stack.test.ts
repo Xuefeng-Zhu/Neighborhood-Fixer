@@ -43,14 +43,18 @@ test('durable standard callback workflow has no automatic submit retry', () => {
 test('JWT authorizer protects application API', () => {
   template.hasResourceProperties('AWS::ApiGatewayV2::Authorizer', {
     AuthorizerType: 'JWT',
+    JwtConfiguration: {
+      Issuer: { Ref: 'ClerkIssuerUrl' },
+      Audience: [{ Ref: 'AuthAudience' }],
+    },
   });
   template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
     AuthorizationType: 'JWT',
     RouteKey: 'ANY /api/{proxy+}',
+    AuthorizationScopes: ['nf:resident'],
   });
-  template.hasResourceProperties('AWS::Cognito::UserPool', {
-    AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
-  });
+  for (const kind of ['UserPool', 'UserPoolClient', 'UserPoolDomain'])
+    template.resourceCountIs(`AWS::Cognito::${kind}`, 0);
 });
 test('CORS preflight is unauthenticated while application requests remain JWT protected', () => {
   template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
@@ -66,7 +70,7 @@ test('CORS preflight is unauthenticated while application requests remain JWT pr
   });
   template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
     CorsConfiguration: Match.objectLike({
-      AllowHeaders: ['authorization', 'content-type'],
+      AllowHeaders: ['authorization', 'content-type', 'idempotency-key'],
       AllowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
       AllowOrigins: Match.anyValue(),
     }),
@@ -138,14 +142,7 @@ test('AgentCore creation waits for execution roles and attached ECR permissions'
     }
   }
 });
-test('Cognito callback and logout match and secret bootstrap grants stay aligned', () => {
-  const clients = Object.values(
-    template.findResources('AWS::Cognito::UserPoolClient'),
-  ) as any[];
-  assert.deepEqual(
-    clients[0].Properties.CallbackURLs,
-    clients[0].Properties.LogoutURLs,
-  );
+test('secret bootstrap grants stay aligned and no Cognito configuration leaks into final API', () => {
   const funcs = Object.values(
     template.findResources('AWS::Lambda::Function'),
   ) as any[];
@@ -153,6 +150,14 @@ test('Cognito callback and logout match and secret bootstrap grants stay aligned
     (f) => f.Properties.ImageConfig.Command[0] === 'services.api.main.handler',
   );
   assert.equal(api.Properties.Environment.Variables.NF_PORTAL_SECRET_ARN, '');
+  assert.equal(
+    api.Properties.Environment.Variables.NF_COGNITO_USER_POOL_ID,
+    undefined,
+  );
+  assert.equal(
+    api.Properties.Environment.Variables.NF_COGNITO_CLIENT_ID,
+    undefined,
+  );
   template.resourceCountIs('AWS::SecretsManager::Secret', 1);
   for (const f of funcs) {
     assert.equal(
@@ -212,11 +217,95 @@ test('generated Amplify origin bootstraps all consumers without a dependency cyc
     EnvironmentVariables: Match.arrayWith([
       { Name: 'VITE_API_BASE_URL', Value: Match.anyValue() },
       {
-        Name: 'VITE_COGNITO_REDIRECT_URI',
-        Value: { 'Fn::Join': ['', [origin, '/']] },
+        Name: 'VITE_CLERK_PUBLISHABLE_KEY',
+        Value: { Ref: 'ClerkPublishableKey' },
       },
     ]),
   });
+});
+
+test('Clerk instance, quota and generation configuration is explicit and server controlled', () => {
+  template.hasParameter('ClerkIssuerUrl', {
+    Type: 'String',
+    Default: Match.absent(),
+  });
+  template.hasParameter('ClerkPublishableKey', {
+    Type: 'String',
+    Default: Match.absent(),
+  });
+  template.hasParameter('DataGeneration', {
+    Type: 'String',
+    Default: Match.absent(),
+  });
+  for (const [name, value] of [
+    ['ReportsPerDay', 10],
+    ['UploadsPerDay', 25],
+    ['ReasoningJobsPerDay', 30],
+    ['WorkspaceReportsPerDay', 100],
+    ['WorkspaceUploadsPerDay', 250],
+    ['WorkspaceReasoningJobsPerDay', 300],
+  ])
+    template.hasParameter(name as string, { Default: value });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Stage', {
+    DefaultRouteSettings: {
+      ThrottlingRateLimit: { Ref: 'ApiRequestsPerSecond' },
+      ThrottlingBurstLimit: { Ref: 'ApiBurstLimit' },
+    },
+  });
+  const api = Object.values(
+    template.findResources('AWS::Lambda::Function'),
+  ).find(
+    (r: any) =>
+      r.Properties.ImageConfig.Command[0] === 'services.api.main.handler',
+  )!;
+  assert.deepEqual(api.Properties.Environment.Variables.NF_DATA_GENERATION, {
+    Ref: 'DataGeneration',
+  });
+  assert.deepEqual(api.Properties.Environment.Variables.NF_CLERK_ISSUER, {
+    Ref: 'ClerkIssuerUrl',
+  });
+  assert.deepEqual(
+    api.Properties.Environment.Variables.NF_WORKSPACE_REPORTS_PER_DAY,
+    { Ref: 'WorkspaceReportsPerDay' },
+  );
+  assert.deepEqual(
+    api.Properties.Environment.Variables.NF_WORKSPACE_UPLOADS_PER_DAY,
+    { Ref: 'WorkspaceUploadsPerDay' },
+  );
+  assert.deepEqual(
+    api.Properties.Environment.Variables.NF_WORKSPACE_REASONING_JOBS_PER_DAY,
+    { Ref: 'WorkspaceReasoningJobsPerDay' },
+  );
+  assert.equal(api.Properties.Environment.Variables.NF_AUTH_PROVIDER, 'clerk');
+  for (const name of ['UserPoolId', 'UserPoolClientId', 'CognitoDomain'])
+    assert.equal(template.toJSON().Outputs[name], undefined);
+  for (const name of [
+    'ClerkIssuerUrl',
+    'ClerkPublishableKey',
+    'AuthAudience',
+    'SharedWorkspaceId',
+    'DataGeneration',
+  ])
+    template.hasOutput(name, { Value: Match.anyValue() });
+});
+
+test('hosted frontend headers permit Clerk and map execution with no unsafe script evaluation', () => {
+  const app = Object.values(template.findResources('AWS::Amplify::App'))[0];
+  const headers = JSON.stringify(app.Properties.CustomHeaders);
+  for (const value of [
+    'Strict-Transport-Security',
+    'Content-Security-Policy',
+    'X-Content-Type-Options',
+    'Referrer-Policy',
+    'frame-ancestors',
+    'ClerkIssuerUrl',
+    'challenges.cloudflare.com',
+    'img.clerk.com',
+    'strict-origin-when-cross-origin',
+  ])
+    assert.ok(headers.includes(value));
+  assert.ok(!headers.includes('unsafe-eval'));
+  assert.ok(!headers.includes('value: "no-referrer"'));
 });
 
 test('worker concurrency reservation is optional for accounts with low quotas', () => {

@@ -16,7 +16,7 @@ async def invoke(payload, context):
         raise ValueError("Unsupported reasoning phase")
     principal = payload.get("principal", {})
     # Only trusted backend IAM can invoke this runtime; it supplies the principal
-    # after Cognito authorization. Runtime permissions are never frontend grants.
+    # after Clerk session authorization. Runtime permissions are never frontend grants.
     args = payload.get("arguments", {})
     with tracer.start_as_current_span("case_reasoning") as span:
         span.set_attribute("nf.operation", action)

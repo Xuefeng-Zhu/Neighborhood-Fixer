@@ -7,8 +7,11 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { ApprovalPanel } from './CaseDetail';
+import { ApprovalPanel, CaseDetail } from './CaseDetail';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { createApiClient } from '../lib/api';
 import type { Draft, Incident } from '../lib/api';
+import { ApiContext } from '../lib/api-context';
 vi.mock('../components/NeighborhoodMap', () => ({
   NeighborhoodMap: () => null,
 }));
@@ -32,7 +35,9 @@ const incident = { id: 'case-1', shared_public: false } as Incident;
 function wrap(d: Draft = draft) {
   return (
     <QueryClientProvider client={new QueryClient()}>
-      <ApprovalPanel incident={incident} draft={d} onSuccess={() => {}} />
+      <ApiContext.Provider value={createApiClient()}>
+        <ApprovalPanel incident={incident} draft={d} onSuccess={() => {}} />
+      </ApiContext.Provider>
     </QueryClientProvider>
   );
 }
@@ -107,5 +112,58 @@ describe('exact submission approval', () => {
     expect(
       screen.getByRole('button', { name: 'Approve exact submission' }),
     ).toBeDisabled();
+  });
+});
+
+describe('illustrative shared sample', () => {
+  it('shows a read-only label and offers no follow, verification, or approval action', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({
+              id: 'sample',
+              title: 'Illustrative curb',
+              category: 'damaged_sidewalk',
+              description: 'An illustrative case.',
+              location_label: 'Demo Borough',
+              agency_status: 'OPEN',
+              resolution_status: 'UNVERIFIED',
+              submission_status: 'AWAITING_APPROVAL',
+              observation_count: 1,
+              is_sample: true,
+              is_owner: true,
+              draft,
+            }),
+          ),
+      ),
+    );
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ApiContext.Provider value={createApiClient()}>
+          <MemoryRouter initialEntries={['/cases/sample']}>
+            <Routes>
+              <Route path="/cases/:id" element={<CaseDetail />} />
+            </Routes>
+          </MemoryRouter>
+        </ApiContext.Provider>
+      </QueryClientProvider>,
+    );
+    expect(
+      await screen.findByText(/Illustrative sample case · read only/),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: 'Follow this case' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Approve exact submission' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Save verification' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Cancel if not yet sent' }),
+    ).not.toBeInTheDocument();
   });
 });

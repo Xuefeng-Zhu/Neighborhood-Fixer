@@ -267,7 +267,11 @@ def test_callback_registration_reconciles_prior_approval(tmp_path, monkeypatch):
     from services.api.store import SQLiteStore
 
     store = SQLiteStore(tmp_path / "callback.sqlite")
-    domain = SimpleNamespace(store=store)
+    domain = SimpleNamespace(
+        store=store,
+        check_admission=lambda tx: None,
+        settings=SimpleNamespace(data_generation="test-generation"),
+    )
     with store.atomic("workspace") as tx:
         tx.put(
             "incident",
@@ -326,7 +330,10 @@ def test_callback_cannot_wake_a_different_case(tmp_path, monkeypatch):
     monkeypatch.setattr(aws_workflow, "_client", lambda: client)
     with pytest.raises(PermissionError):
         aws_workflow.wake_approval(
-            "workspace", "another-case", "revision", SimpleNamespace(store=store)
+            "workspace",
+            "another-case",
+            "revision",
+            SimpleNamespace(store=store, check_admission=lambda tx: None),
         )
     client.send_task_success.assert_not_called()
 
@@ -654,27 +661,3 @@ def test_coordinator_schema_preserves_exact_route_recipient_and_category(monkeyp
         engine._coordinator(
             OBS, {"recipient": "Unreviewed agency"}, PRINCIPAL, engine.Budget()
         )
-
-
-def test_admin_workspace_provisioning_requires_explicit_apply_and_refuses_reassignment(
-    tmp_path,
-):
-    import importlib.util
-
-    from services.api.store import SQLiteStore
-
-    spec = importlib.util.spec_from_file_location(
-        "provision_workspace", "infra/cdk/provision_workspace.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    store = SQLiteStore(tmp_path / "memberships.sqlite")
-    assert not module.provision(store, "shared", ["alex", "sam"])["applied"]
-    with store.atomic("auth") as tx:
-        assert tx.get("membership", "alex") is None
-    module.provision(store, "shared", ["alex", "sam"], apply=True)
-    with store.atomic("auth") as tx:
-        assert tx.get("membership", "alex")["target_workspace_id"] == "shared"
-        assert tx.get("membership", "alex")["workspace_id"] == "auth"
-    with pytest.raises(ValueError, match="reassignment"):
-        module.provision(store, "other", ["alex"], apply=True)

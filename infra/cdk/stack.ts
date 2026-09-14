@@ -7,7 +7,6 @@ import {
   aws_iam as iam,
   aws_lambda as lambda,
   aws_logs as logs,
-  aws_cognito as cognito,
   aws_apigatewayv2 as apigw,
   aws_apigatewayv2_integrations as integrations,
   aws_apigatewayv2_authorizers as authorizers,
@@ -32,7 +31,50 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       allowedPattern: '^$|https://[a-zA-Z0-9.-]+',
     });
     // Keep the app independent of backend resources. Branch settings may refer
-    // to them after its generated domain has supplied CORS and Cognito URLs.
+    // to them after its generated domain has supplied CORS and authorized-party URLs.
+    const clerkIssuer = new cdk.CfnParameter(this, 'ClerkIssuerUrl', {
+      type: 'String',
+      allowedPattern: '^https://[a-zA-Z0-9-]+\\.clerk\\.accounts\\.dev$',
+      description:
+        'Exact Clerk development instance issuer, without trailing slash',
+    });
+    const clerkKey = new cdk.CfnParameter(this, 'ClerkPublishableKey', {
+      type: 'String',
+      allowedPattern: '^pk_test_[a-zA-Z0-9_-]+$',
+      description:
+        'Public Clerk development publishable key; never a secret key',
+    });
+    const audience = new cdk.CfnParameter(this, 'AuthAudience', {
+      type: 'String',
+      default: 'neighborhood-fixer-api',
+      allowedValues: ['neighborhood-fixer-api'],
+    });
+    const sharedWorkspace = new cdk.CfnParameter(this, 'SharedWorkspaceId', {
+      type: 'String',
+      default: 'demo-borough-v1',
+      allowedPattern: '^[a-zA-Z0-9_-]{1,64}$',
+    });
+    const generation = new cdk.CfnParameter(this, 'DataGeneration', {
+      type: 'String',
+      allowedPattern: '^[a-zA-Z0-9_-]{1,64}$',
+      description:
+        'Explicit data generation; changed only by the reviewed cutover procedure',
+    });
+    const quota = (name: string, value: number, maximum: number) =>
+      new cdk.CfnParameter(this, name, {
+        type: 'Number',
+        default: value,
+        minValue: 1,
+        maxValue: maximum,
+      });
+    const reports = quota('ReportsPerDay', 10, 100);
+    const uploads = quota('UploadsPerDay', 25, 250);
+    const reasoning = quota('ReasoningJobsPerDay', 30, 300);
+    const workspaceReports = quota('WorkspaceReportsPerDay', 100, 1000);
+    const workspaceUploads = quota('WorkspaceUploadsPerDay', 250, 1000);
+    const workspaceReasoning = quota('WorkspaceReasoningJobsPerDay', 300, 1000);
+    const apiRate = quota('ApiRequestsPerSecond', 10, 100);
+    const apiBurst = quota('ApiBurstLimit', 20, 200);
     const hosting = new amplify.CfnApp(this, 'Hosting', {
       name: 'Neighborhood Fixer',
       platform: 'WEB',
@@ -41,6 +83,21 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       customRules: [
         { source: '/<*>', target: '/index.html', status: '404-200' },
       ],
+      customHeaders: cdk.Fn.join('', [
+        'customHeaders:\n  - pattern: "**/*"\n    headers:\n',
+        '      - key: Strict-Transport-Security\n        value: "max-age=31536000; includeSubDomains"\n',
+        '      - key: X-Content-Type-Options\n        value: "nosniff"\n',
+        '      - key: Referrer-Policy\n        value: "strict-origin-when-cross-origin"\n',
+        '      - key: X-Frame-Options\n        value: "DENY"\n',
+        '      - key: Permissions-Policy\n        value: "camera=(), microphone=(), geolocation=(self)"\n',
+        "      - key: Content-Security-Policy\n        value: \"default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self' ",
+        clerkIssuer.valueAsString,
+        " https://challenges.cloudflare.com; connect-src 'self' ",
+        clerkIssuer.valueAsString,
+        ` https://*.execute-api.${this.region}.amazonaws.com https://maps.geo.${this.region}.amazonaws.com https://challenges.cloudflare.com; img-src 'self' data: blob: https://img.clerk.com https://images.clerk.dev; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; frame-src `,
+        clerkIssuer.valueAsString,
+        " https://challenges.cloudflare.com; form-action 'self'; upgrade-insecure-requests\"\n",
+      ]),
     });
     const useCustomFrontendOrigin = new cdk.CfnCondition(
       this,
@@ -132,42 +189,6 @@ export class NeighborhoodFixerStack extends cdk.Stack {
     const secret = new secrets.Secret(this, 'PortalSecret', {
       generateSecretString: { passwordLength: 48, excludePunctuation: true },
     });
-    const pool = new cognito.UserPool(this, 'Residents', {
-      selfSignUpEnabled: false,
-      signInAliases: { email: true },
-      autoVerify: { email: true },
-      passwordPolicy: {
-        minLength: 12,
-        requireDigits: true,
-        requireLowercase: true,
-        requireUppercase: true,
-      },
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-    });
-    const client = pool.addClient('Web', {
-      generateSecret: false,
-      authFlows: { userSrp: true },
-      oAuth: {
-        flows: { authorizationCodeGrant: true },
-        scopes: [
-          cognito.OAuthScope.OPENID,
-          cognito.OAuthScope.EMAIL,
-          cognito.OAuthScope.PROFILE,
-        ],
-        callbackUrls: [cdk.Fn.join('', [frontendOrigin, '/'])],
-        logoutUrls: [cdk.Fn.join('', [frontendOrigin, '/'])],
-      },
-      preventUserExistenceErrors: true,
-    });
-    const domain = pool.addDomain('HostedLogin', {
-      cognitoDomain: {
-        domainPrefix: cdk.Fn.join('-', [
-          'neighborhood-fixer',
-          this.account,
-          this.region,
-        ]),
-      },
-    });
     const common = {
       NF_MODE: 'aws',
       NF_ENVIRONMENT: 'demo',
@@ -176,6 +197,18 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       NF_DATA_DIR: '/tmp/neighborhood-fixer',
       NF_ALLOWED_ORIGINS: frontendOrigin,
       NF_PORTAL_SECRET_ARN: secret.secretArn,
+      NF_AUTH_PROVIDER: 'clerk',
+      NF_CLERK_ISSUER: clerkIssuer.valueAsString,
+      NF_AUTH_AUDIENCE: audience.valueAsString,
+      NF_AUTHORIZED_PARTIES: frontendOrigin,
+      NF_SHARED_WORKSPACE_ID: sharedWorkspace.valueAsString,
+      NF_DATA_GENERATION: generation.valueAsString,
+      NF_REPORTS_PER_DAY: reports.valueAsString,
+      NF_UPLOADS_PER_DAY: uploads.valueAsString,
+      NF_REASONING_JOBS_PER_DAY: reasoning.valueAsString,
+      NF_WORKSPACE_REPORTS_PER_DAY: workspaceReports.valueAsString,
+      NF_WORKSPACE_UPLOADS_PER_DAY: workspaceUploads.valueAsString,
+      NF_WORKSPACE_REASONING_JOBS_PER_DAY: workspaceReasoning.valueAsString,
     };
     const log = (name: string) =>
       new logs.LogGroup(this, name, {
@@ -528,8 +561,6 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       NF_AGENTCORE_RUNTIME_ARN: runtime.attrAgentRuntimeArn,
       NF_AGENTCORE_BROWSER_ID: browser.attrBrowserId,
       NF_BEDROCK_MODEL_ID: modelId.valueAsString,
-      NF_COGNITO_USER_POOL_ID: pool.userPoolId,
-      NF_COGNITO_CLIENT_ID: client.userPoolClientId,
       NF_SECRET_BOOTSTRAP: '1',
     });
     records.grantReadWriteData(api);
@@ -550,16 +581,16 @@ export class NeighborhoodFixerStack extends cdk.Stack {
           apigw.CorsHttpMethod.PATCH,
           apigw.CorsHttpMethod.OPTIONS,
         ],
-        allowHeaders: ['authorization', 'content-type'],
+        allowHeaders: ['authorization', 'content-type', 'idempotency-key'],
         allowCredentials: true,
       },
     });
     const integration = new integrations.HttpLambdaIntegration('FastApi', api);
-    const authorizer = new authorizers.HttpUserPoolAuthorizer(
+    const authorizer = new authorizers.HttpJwtAuthorizer(
       'ResidentJwt',
-      pool,
+      clerkIssuer.valueAsString,
       {
-        userPoolClients: [client],
+        jwtAudience: [audience.valueAsString],
         identitySource: ['$request.header.Authorization'],
       },
     );
@@ -568,6 +599,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       methods: [apigw.HttpMethod.ANY],
       integration,
       authorizer,
+      authorizationScopes: ['nf:resident'],
     });
     // A method-specific route takes precedence over the authenticated ANY
     // route, allowing API Gateway's configured CORS preflight response.
@@ -582,6 +614,11 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       methods: [apigw.HttpMethod.GET],
       integration,
     });
+    const stage = http.defaultStage!.node.defaultChild as apigw.CfnStage;
+    stage.defaultRouteSettings = {
+      throttlingRateLimit: apiRate.valueAsNumber,
+      throttlingBurstLimit: apiBurst.valueAsNumber,
+    };
     const map = new location.CfnMap(this, 'NeighborhoodMap', {
       mapName: 'NeighborhoodFixer',
       configuration: { style: 'VectorEsriLightGrayCanvas' },
@@ -611,12 +648,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       environmentVariables: [
         { name: 'VITE_API_BASE_URL', value: http.apiEndpoint },
         { name: 'VITE_AWS_REGION', value: this.region },
-        { name: 'VITE_COGNITO_CLIENT_ID', value: client.userPoolClientId },
-        { name: 'VITE_COGNITO_DOMAIN', value: domain.baseUrl() },
-        {
-          name: 'VITE_COGNITO_REDIRECT_URI',
-          value: cdk.Fn.join('', [frontendOrigin, '/']),
-        },
+        { name: 'VITE_CLERK_PUBLISHABLE_KEY', value: clerkKey.valueAsString },
         { name: 'VITE_LOCATION_MAP_NAME', value: map.ref },
       ],
     });
@@ -626,9 +658,11 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       PortalUrl: portalUrl.url,
       PortalSecretArn: secret.secretArn,
       PortalStatusManagementEnabled: demoStatusManagement.valueAsString,
-      UserPoolId: pool.userPoolId,
-      UserPoolClientId: client.userPoolClientId,
-      CognitoDomain: domain.baseUrl(),
+      ClerkIssuerUrl: clerkIssuer.valueAsString,
+      ClerkPublishableKey: clerkKey.valueAsString,
+      AuthAudience: audience.valueAsString,
+      SharedWorkspaceId: sharedWorkspace.valueAsString,
+      DataGeneration: generation.valueAsString,
       EvidenceBucket: evidence.bucketName,
       RecordsTable: records.tableName,
       PortalRecordsTable: portalRecords.tableName,
@@ -639,6 +673,8 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       LocationMapName: map.ref,
       LocationKeyName: key.ref,
     }))
-      new cdk.CfnOutput(this, name, { value });
+      new cdk.CfnOutput(this, name + 'Output', { value }).overrideLogicalId(
+        name,
+      );
   }
 }

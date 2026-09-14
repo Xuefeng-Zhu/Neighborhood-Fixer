@@ -24,6 +24,29 @@ class SessionRequest(StrictModel):
     workspace_id: str | None = None
 
 
+class QuotaUsage(StrictModel):
+    limit: int = Field(ge=1)
+    used: int = Field(ge=0)
+    reserved: int = Field(ge=0)
+    remaining: int = Field(ge=0)
+
+
+class QuotaSnapshot(StrictModel):
+    date_utc: str
+    reset_at: str
+    reports: QuotaUsage
+    uploads: QuotaUsage
+    reasoning: QuotaUsage
+
+
+class SessionResponse(StrictModel):
+    user: User
+    workspace_id: str
+    mode: Literal["local", "aws"]
+    generation: str | None = None
+    quotas: QuotaSnapshot | None = None
+
+
 class ObservationInput(StrictModel):
     description: str = Field(min_length=8, max_length=3000)
     category: Category
@@ -125,6 +148,7 @@ class Observation(ObservationInput):
 
 
 class Incident(BaseModel):
+    is_sample: bool = False
     id: str
     title: str
     description: str
@@ -267,6 +291,7 @@ class ErrorBody(BaseModel):
     message: str
     retryable: bool
     correlation_id: str
+    details: dict[str, Any] | None = None
 
 
 class ErrorEnvelope(BaseModel):

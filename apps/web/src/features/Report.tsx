@@ -15,7 +15,10 @@ import {
   Upload,
   X,
 } from 'lucide-react';
-import { categoryLabels, isPending, post, request, upload } from '../lib/api';
+import { categoryLabels, isPending } from '../lib/api';
+import { useApi } from '../lib/api-context';
+import { creationAttempt } from '../lib/idempotency';
+import { reportDraftKey } from '../lib/draft-lifecycle';
 import type {
   Analysis,
   Evidence,
@@ -59,6 +62,7 @@ type Saved = {
   operationKind?: 'analysis' | 'decision';
   analysis?: Analysis;
   candidates?: Incident[];
+  creationRequest?: { key: string; body: string };
 };
 const initial: Values = {
   description: '',
@@ -80,11 +84,13 @@ const steps = [
   'Approve',
 ];
 export function Report() {
+  const { request, post, upload } = useApi();
   const { session } = useSession();
+  const quotas = session.quotas;
   const maxUploadMB = session.mode.toLowerCase().includes('local') ? 8 : 4;
   const navigate = useNavigate();
   const client = useQueryClient();
-  const storageKey = `nf-report:${session.workspace_id}:${session.user.id}`;
+  const storageKey = reportDraftKey(session);
   const [saved] = useState<Saved>(() => {
     try {
       return (
@@ -106,6 +112,7 @@ export function Report() {
   const [step, setStep] = useState(saved.step);
   const [evidence, setEvidence] = useState<Evidence[]>(saved.evidence);
   const [observationId, setObservationId] = useState(saved.observationId);
+  const [creationRequest, setCreationRequest] = useState(saved.creationRequest);
   const [operationId, setOperationId] = useState(saved.operationId);
   const [operationKind, setOperationKind] = useState(saved.operationKind);
   const [analysis, setAnalysis] = useState(saved.analysis);
@@ -127,6 +134,7 @@ export function Report() {
         operationKind,
         analysis,
         candidates,
+        creationRequest,
       }),
     );
   }, [
@@ -138,6 +146,7 @@ export function Report() {
     operationKind,
     analysis,
     candidates,
+    creationRequest,
     storageKey,
   ]);
   const operation = useQuery({
@@ -170,11 +179,28 @@ export function Report() {
     }
     if (op.result?.analysis) {
       setAnalysis(op.result.analysis);
-      setCandidates(op.result.duplicate_candidates || []);
+      setCandidates(
+        (op.result.duplicate_candidates || []).filter(
+          (candidate) => !candidate.is_sample,
+        ),
+      );
       setOperationId(undefined);
       setStep(2);
     }
   }, [operation.data, operationKind, navigate, client, storageKey]);
+  async function createObservation(payload: unknown) {
+    const attempt = creationAttempt(payload, creationRequest);
+    setCreationRequest(attempt);
+    // Persist before the network write so a reload/retry uses the same request identity.
+    const current = JSON.parse(localStorage.getItem(storageKey) || '{}');
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({ ...current, creationRequest: attempt }),
+    );
+    return post<Observation>('/observations', payload, {
+      headers: { 'Idempotency-Key': attempt.key },
+    });
+  }
   async function run(action: () => Promise<void>) {
     setBusy(true);
     setError(undefined);
@@ -231,7 +257,7 @@ export function Report() {
             method: 'PATCH',
             body: JSON.stringify(payload),
           })
-        : await post<Observation>('/observations', payload);
+        : await createObservation(payload);
       setObservationId(observation.id);
       const result = await post<{ operation_id: string }>(
         `/observations/${observation.id}/analyze`,
@@ -279,6 +305,13 @@ export function Report() {
     !!operationId && (!operation.data || isPending(operation.data.status));
   return (
     <main className="page report-page">
+      {quotas && (
+        <p className="notice small" role="status">
+          Today: {quotas.reports.remaining} reports, {quotas.uploads.remaining}{' '}
+          uploads and {quotas.reasoning.remaining} AI reviews remaining. Resets{' '}
+          {new Date(quotas.reset_at).toLocaleString()}.
+        </p>
+      )}
       <Link className="back-link" to="/">
         <ArrowLeft size={16} />
         Neighborhood

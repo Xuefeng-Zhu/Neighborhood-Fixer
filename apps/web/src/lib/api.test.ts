@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { ApiError, isPending, request } from './api';
+import { ApiError, isPending, localApi } from './api';
+const { request } = localApi;
 afterEach(() => vi.unstubAllGlobals());
 describe('API failures and durable operation polling', () => {
   it('preserves actionable server errors and correlation IDs', async () => {

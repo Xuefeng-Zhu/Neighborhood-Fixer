@@ -3,14 +3,15 @@ import { NavLink, Route, Routes, Link } from 'react-router-dom';
 import { AlertCircle, ChevronDown, UserRound, Bell, X } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSession } from './lib/session';
-import { request, post, dateTime } from './lib/api';
+import { dateTime } from './lib/api';
+import { useApi } from './lib/api-context';
 import { Neighborhood } from './features/Neighborhood';
 import { Report } from './features/Report';
 import { CaseDetail } from './features/CaseDetail';
 import { DemoPanel } from './components/DemoPanel';
 import { ErrorMessage } from './components/ui';
-import { signOut } from './lib/auth';
 function Notifications() {
+  const { request, post } = useApi();
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<unknown>();
   const client = useQueryClient();
@@ -91,7 +92,7 @@ function Notifications() {
   );
 }
 export default function App() {
-  const { session, switchResident } = useSession();
+  const { session, switchResident, signOut } = useSession();
   const local = session.mode.toLowerCase().includes('local');
   return (
     <>
@@ -128,7 +129,7 @@ export default function App() {
           ) : (
             <>
               <span className="small">{session.user.name}</span>
-              <button className="text-button" onClick={signOut}>
+              <button className="text-button" onClick={() => void signOut?.()}>
                 Sign out
               </button>
             </>

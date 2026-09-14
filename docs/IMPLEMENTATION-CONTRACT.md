@@ -10,9 +10,9 @@ SQLite and DynamoDB implement the same scoped storage interface. The local worke
 
 ## Identity and visibility
 
-A local session initially creates an isolated workspace. Joining by a known workspace ID is insufficient: switching seeded residents requires the existing signed cookie. AWS identity comes from API Gateway's trusted Cognito authorizer event, with persisted membership checked on every request.
+A local session initially creates an isolated workspace. Joining by a known workspace ID is insufficient: switching seeded residents requires the existing signed cookie. AWS identity comes from API Gateway's trusted Clerk JWT event with exact issuer/audience/scope and backend azp/session/expiry checks. The server assigns the shared workspace and generation, checks admission and disabled residents on every request, and enforces atomic per-resident and workspace daily observation/upload/reasoning quotas. Client-selected workspace or identity metadata is never authoritative.
 
-Agency-send consent, public-summary consent and public-photo consent are distinct. Public incident projections exclude private contacts, receipt capabilities, internal storage paths, approvals and callback tokens. Evidence access is checked on every request. Shared images are sanitized derivatives; original upload bytes are discarded after decoding and sanitization.
+Agency-send consent, public-summary consent and public-photo consent are distinct. Public incident projections exclude private contacts, receipt capabilities, internal storage paths, approvals, callback tokens, exact canonical coordinates and evidence-derived analysis. Evidence access is checked on every request. Shared images are sanitized derivatives; original upload bytes are discarded after decoding and sanitization.
 
 ## Browser execution
 

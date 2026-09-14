@@ -4,8 +4,8 @@
  *
  * NF_RUN_AWS_BROWSER_SMOKE=1 npm run test:aws:web -- --config .local/amplify/frontend.manifest.json
  * Supply NF_AWS_SMOKE_USERNAME and NF_AWS_SMOKE_PASSWORD through private environment.
- * The account must already have a permanent password and workspace membership.
- * MFA, CAPTCHA, and password-change challenges require the account owner to finish setup.
+ * The Clerk account must already have a password and be admitted for validation.
+ * MFA, CAPTCHA, and email verification challenges require the account owner to finish setup.
  * Optional --session-output .local/aws-sessions/alex.json exports an authenticated
  * short-lived API session for an authorized backend journey. It contains a bearer
  * token, is written atomically with mode 0600, and must be kept private and deleted
@@ -149,12 +149,6 @@ export function smokeConfig(env, manifest = {}) {
   );
   if (!/^[a-z]{2}(?:-[a-z]+)+-\d+$/.test(region))
     throw new Error('Invalid NF_AWS_REGION.');
-  const clientId = required(
-    'NF_AWS_COGNITO_CLIENT_ID',
-    frontend.cognito_client_id,
-  );
-  if (!/^[a-zA-Z0-9]+$/.test(clientId))
-    throw new Error('Invalid NF_AWS_COGNITO_CLIENT_ID.');
   return {
     web: httpsOrigin(
       required('NF_AWS_WEB_URL', frontend.web_url),
@@ -164,33 +158,27 @@ export function smokeConfig(env, manifest = {}) {
       required('NF_AWS_API_URL', frontend.api_url),
       'NF_AWS_API_URL',
     ),
-    cognito: httpsOrigin(
-      required('NF_AWS_COGNITO_DOMAIN', frontend.cognito_domain),
-      'NF_AWS_COGNITO_DOMAIN',
+    clerk: httpsOrigin(
+      required('NF_AWS_CLERK_ISSUER', frontend.clerk_issuer),
+      'NF_AWS_CLERK_ISSUER',
     ),
-    clientId,
+    audience: frontend.auth_audience || 'neighborhood-fixer-api',
     mapHost: `maps.geo.${region}.amazonaws.com`,
     username: required('NF_AWS_SMOKE_USERNAME'),
     password: required('NF_AWS_SMOKE_PASSWORD'),
   };
 }
 
-export async function probeAuthenticatedApi(api) {
-  let token;
-  try {
-    token = JSON.parse(sessionStorage.getItem('nf-cognito-access') || 'null');
-  } catch {
-    token = null;
-  }
-  const tokenPresent =
-    typeof token?.accessToken === 'string' && Boolean(token.accessToken);
+export async function probeAuthenticatedApi({ api, accessToken, expiresAt }) {
+  const tokenPresent = typeof accessToken === 'string' && Boolean(accessToken);
   const headers = tokenPresent
-    ? { Authorization: `Bearer ${token.accessToken}` }
+    ? { Authorization: `Bearer ${accessToken}` }
     : {};
   const probe = async (path, options = {}, includeSession = false) => {
     try {
       const response = await fetch(`${api}${path}`, {
         headers,
+        credentials: 'omit',
         ...options,
       });
       let value = {};
@@ -225,15 +213,36 @@ export async function probeAuthenticatedApi(api) {
     member: Boolean(value.user?.id && value.workspace_id),
     workspace_id: value.workspace_id,
     user_id: value.user?.id,
-    expires_at: token?.expiresAt,
+    expires_at: expiresAt,
     incidents: incidents.status,
     fixtures: fixtures.status,
     demoLogin: demoLogin.status,
   };
 }
 
-// Playwright's test runner captures failure DOM even when screenshots are off.
-// Use its browser library directly so authentication pages never become artifacts.
+// Run the browser library directly; failure DOM, traces and token logs are never saved.
+export function tokenMetadata(token) {
+  try {
+    const value = JSON.parse(
+      Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+    );
+    return {
+      expiresAt: value.exp * 1000,
+      issuer: value.iss,
+      audience: value.aud,
+      origin: value.azp,
+      scope: value.scope,
+      session: value.sid,
+    };
+  } catch {
+    throw new Error('A verified Clerk session token is required.');
+  }
+}
+
+export function signedOutEntry(page) {
+  return page.getByRole('link', { name: 'Sign in', exact: true });
+}
+
 export async function runSmoke(env = process.env) {
   if (env.NF_RUN_AWS_BROWSER_SMOKE !== '1') {
     console.log(
@@ -241,25 +250,31 @@ export async function runSmoke(env = process.env) {
     );
     return 0;
   }
-  let phase = 'configuration';
-  let browser;
-  let context;
-  let timeout;
-  const pass = (label) => console.log(`PASS ${label}`);
-  const verify = (condition) => {
-    if (!condition) throw new Error('Check failed.');
-  };
+  let phase = 'configuration',
+    browser,
+    context,
+    timer;
   try {
     const configIndex = process.argv.indexOf('--config');
     const configPath =
-      env.NF_AWS_FRONTEND_MANIFEST ||
-      (configIndex >= 0 ? process.argv[configIndex + 1] : undefined);
+      configIndex >= 0
+        ? process.argv[configIndex + 1]
+        : env.NF_AWS_FRONTEND_MANIFEST;
     const manifest = configPath
       ? JSON.parse(await readFile(configPath, 'utf8'))
       : {};
     const c = smokeConfig(env, manifest);
     const sessionOutput = sessionOutputPath(process.argv);
-    // Debug output can include locator values and OAuth URLs. Disable it before import.
+    const keeperIndex = process.argv.indexOf('--keep-session-seconds');
+    const keeperSeconds =
+      keeperIndex < 0 ? 0 : Number(process.argv[keeperIndex + 1]);
+    if (
+      !Number.isInteger(keeperSeconds) ||
+      keeperSeconds < 0 ||
+      keeperSeconds > 600 ||
+      (keeperSeconds && !sessionOutput)
+    )
+      throw new Error('Invalid bounded session keeper configuration.');
     delete process.env.DEBUG;
     delete process.env.PWDEBUG;
     delete process.env.PLAYWRIGHT_DEBUG;
@@ -267,14 +282,11 @@ export async function runSmoke(env = process.env) {
     const browserEnv = Object.fromEntries(
       Object.entries(process.env).filter(
         ([name]) =>
-          !/^(NF_|AWS_|VITE_|DEBUG$|PWDEBUG$|PLAYWRIGHT_DEBUG$)/.test(name),
+          !/^(NF_|AWS_|VITE_|CLERK_|DEBUG$|PWDEBUG$|PLAYWRIGHT_DEBUG$)/.test(
+            name,
+          ),
       ),
     );
-    timeout = setTimeout(() => {
-      console.error(`FAIL ${phase}: bounded AWS browser check timed out.`);
-      void browser?.close().finally(() => process.exit(1));
-      setTimeout(() => process.exit(1), 2000).unref();
-    }, 180000);
     browser = await chromium.launch({ headless: true, env: browserEnv });
     context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
@@ -283,258 +295,224 @@ export async function runSmoke(env = process.env) {
     const page = await context.newPage();
     page.setDefaultTimeout(25000);
     page.setDefaultNavigationTimeout(35000);
-    let appErrors = 0;
-    let authorizedPkce = false;
-    let tokenExchange = false;
-    let descriptorLoaded = false;
-    let tileLoaded = false;
-    let observedAccessToken;
-    const tokenCaptures = [];
+    timer = setTimeout(
+      () => {
+        console.error(`FAIL ${phase}: bounded AWS browser check timed out.`);
+        void browser?.close().finally(() => process.exit(1));
+      },
+      (200 + keeperSeconds) * 1000,
+    );
+    let accessToken,
+      appErrors = 0,
+      descriptorLoaded = false,
+      tileLoaded = false;
+    const captures = [];
     page.on('pageerror', () => {
       if (new URL(page.url()).origin === c.web) appErrors++;
     });
     page.on('request', (request) => {
       const url = new URL(request.url());
       if (
-        sessionOutput &&
         url.origin === c.api &&
         url.pathname === '/api/session' &&
         request.method() === 'GET'
       ) {
-        tokenCaptures.push(
+        captures.push(
           request
             .allHeaders()
             .then((headers) => {
               const bearer = /^Bearer ([\w-]+\.[\w-]+\.[\w-]+)$/.exec(
                 headers.authorization || '',
               );
-              if (bearer) observedAccessToken = bearer[1];
+              if (bearer) accessToken = bearer[1];
             })
             .catch(() => {}),
         );
       }
-      if (url.origin === c.cognito && url.pathname === '/oauth2/authorize') {
-        const p = url.searchParams;
-        authorizedPkce =
-          p.get('response_type') === 'code' &&
-          p.get('code_challenge_method') === 'S256' &&
-          /^[\w-]{43}$/.test(p.get('code_challenge') || '') &&
-          (p.get('state') || '').length >= 32 &&
-          p.get('client_id') === c.clientId &&
-          p.get('redirect_uri') === `${c.web}/`;
-      }
     });
     page.on('response', (response) => {
       const url = new URL(response.url());
-      if (url.origin === c.cognito && url.pathname === '/oauth2/token')
-        tokenExchange = response.ok();
       if (url.hostname === c.mapHost && response.ok()) {
         if (url.pathname.endsWith('/style-descriptor')) descriptorLoaded = true;
         if (url.pathname.includes('/tiles/')) tileLoaded = true;
       }
     });
-
+    const verify = (condition) => {
+      if (!condition) throw new Error('Verification failed.');
+    };
+    const pass = (step) => console.log(`PASS ${step}`);
     phase = 'AWS browser CORS preflight';
     const preflight = await context.request.fetch(`${c.api}/api/health`, {
       method: 'OPTIONS',
       headers: {
         Origin: c.web,
-        'Access-Control-Request-Method': 'GET',
-        'Access-Control-Request-Headers': 'authorization,content-type',
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers':
+          'authorization,content-type,idempotency-key',
       },
     });
     const cors = preflight.headers();
     const allowedHeaders = (cors['access-control-allow-headers'] || '')
       .toLowerCase()
       .split(',')
-      .map((header) => header.trim());
+      .map((s) => s.trim());
     verify(
       preflight.ok() &&
         cors['access-control-allow-origin'] === c.web &&
-        cors['access-control-allow-credentials'] === 'true' &&
-        allowedHeaders.includes('authorization') &&
-        allowedHeaders.includes('content-type'),
+        ['authorization', 'content-type', 'idempotency-key'].every((h) =>
+          allowedHeaders.includes(h),
+        ),
     );
     pass(phase);
-
     phase = 'AWS health and signed-out entry';
     const health = await context.request.get(`${c.api}/api/health`);
     verify(health.ok() && (await health.json()).mode === 'aws');
-    const anonymous = await context.request.get(`${c.api}/api/session`);
-    verify([401, 403].includes(anonymous.status()));
-    await page.goto(`${c.web}/`, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('button', { name: 'Sign in with Cognito' }).waitFor();
-    pass(phase);
-
-    phase = 'Cognito authorization redirect';
-    await page.getByRole('button', { name: 'Sign in with Cognito' }).click();
-    await page.waitForURL((url) => url.origin === c.cognito);
-    phase = 'Cognito S256 PKCE request validation';
-    verify(authorizedPkce);
-    // Restrict credential entry to the configured provider's HTTPS origin.
-    verify(new URL(page.url()).origin === c.cognito);
-    phase = 'Cognito username field';
+    verify(
+      [401, 403].includes(
+        (await context.request.get(`${c.api}/api/session`)).status(),
+      ),
+    );
+    await page.goto(c.web + '/', { waitUntil: 'domcontentloaded' });
+    await signedOutEntry(page).click();
+    phase = 'Clerk sign-in (verification challenges require owner setup)';
+    verify([c.web, c.clerk].includes(new URL(page.url()).origin));
     await page
-      .locator('input[name="username"]:visible')
+      .locator(
+        'input[name="identifier"]:visible,input[name="emailAddress"]:visible,input[type="email"]:visible',
+      )
       .first()
       .fill(c.username);
-    phase = 'Cognito password field';
+    const password = page.locator('input[type="password"]:visible').first();
+    // Clerk can render the password field on the identifier screen while still
+    // requiring the identifier to be continued before it accepts the password.
+    await page.getByRole('button', { name: /^Continue$/i }).click();
+    await password.waitFor({ state: 'visible' });
+    verify([c.web, c.clerk].includes(new URL(page.url()).origin));
+    await password.fill(c.password);
     await page
-      .locator('input[type="password"]:visible')
-      .first()
-      .fill(c.password);
-    phase = 'Cognito sign-in submit control';
-    // Observed Classic Hosted UI exposes aria-label="submit", so its accessible
-    // name is not the visible "Sign in" value. Use the form's stable input name.
-    await page
-      .locator('input[name="signInSubmitButton"]:visible')
-      .first()
+      .getByRole('button', { name: /^Continue$|^Sign in$/i })
+      .last()
       .click();
-    phase = 'return from Cognito (account challenges require owner setup)';
-    await page.waitForURL((url) => url.origin === c.web);
     await page
       .getByRole('heading', { name: 'Neighborhood', exact: true })
       .waitFor();
-    verify(tokenExchange && !new URL(page.url()).search);
-    verify(
-      await page.evaluate(() => {
-        const token = JSON.parse(
-          sessionStorage.getItem('nf-cognito-access') || 'null',
-        );
-        return Boolean(
-          token?.accessToken &&
-          token.expiresAt > Date.now() &&
-          !sessionStorage.getItem('nf-cognito-pkce'),
-        );
-      }),
-    );
-    pass('Cognito sign-in with S256 PKCE');
-
-    phase = 'authenticated API response checks';
-    const apiChecks = await page.evaluate(probeAuthenticatedApi, c.api);
-    // Allowlisted numeric/boolean diagnostics only. apiChecks also carries private
-    // identity/export fields, so never log or serialize that object wholesale.
-    console.log(
-      'CHECK API ' +
-        JSON.stringify({
-          session_status: apiChecks.session,
-          session_json_valid: apiChecks.sessionJsonValid === true,
-          token_present: apiChecks.tokenPresent === true,
-          aws_mode: apiChecks.mode === 'aws',
-          member: apiChecks.member === true,
-          incidents_status: apiChecks.incidents,
-          fixtures_status: apiChecks.fixtures,
-          demo_login_status: apiChecks.demoLogin,
-        }),
-    );
-    const localResidentCount = await page
-      .getByLabel('Local demo resident')
-      .count();
-    const localControlCount = await page
-      .getByText('Local scenario controls', { exact: true })
-      .count();
-    const integrationStatusCount = await page
-      .getByText('Integration status', { exact: true })
-      .count();
-    console.log(
-      'CHECK controls ' +
-        JSON.stringify({
-          local_resident: localResidentCount,
-          local_controls: localControlCount,
-          integration_status: integrationStatusCount,
-        }),
-    );
-    verify(
-      apiChecks.session === 200 &&
-        apiChecks.mode === 'aws' &&
-        apiChecks.member &&
-        apiChecks.incidents === 200 &&
-        [403, 404].includes(apiChecks.fixtures) &&
-        [403, 404].includes(apiChecks.demoLogin),
-    );
-    pass(phase);
-    phase = 'local controls absent and AWS integration status present';
-    verify(
-      localResidentCount === 0 &&
-        localControlCount === 0 &&
-        integrationStatusCount === 1,
-    );
-    pass(phase);
-
-    if (sessionOutput) {
-      phase = 'private authenticated API session export';
-      await Promise.all(tokenCaptures);
-      verify(authorizedPkce && tokenExchange && observedAccessToken);
-      await writeSessionExport(sessionOutput, {
-        api_origin: c.api,
-        workspace_id: apiChecks.workspace_id,
-        user_id: apiChecks.user_id,
-        expires_at: apiChecks.expires_at,
-        access_token: observedAccessToken,
+    verify(new URL(page.url()).origin === c.web && !new URL(page.url()).search);
+    await Promise.all(captures);
+    const checks = async () => {
+      verify(accessToken);
+      const metadata = tokenMetadata(accessToken);
+      verify(
+        metadata.issuer === c.clerk &&
+          (metadata.audience === c.audience ||
+            metadata.audience?.includes?.(c.audience)) &&
+          metadata.origin === c.web &&
+          metadata.scope?.split(' ').includes('nf:resident') &&
+          metadata.session?.startsWith('sess_') &&
+          metadata.expiresAt > Date.now(),
+      );
+      const result = await page.evaluate(probeAuthenticatedApi, {
+        api: c.api,
+        accessToken,
+        expiresAt: metadata.expiresAt,
       });
-      observedAccessToken = undefined;
-      pass(phase);
-    }
-
+      verify(
+        result.session === 200 &&
+          result.mode === 'aws' &&
+          result.member &&
+          result.incidents === 200 &&
+          [403, 404].includes(result.fixtures) &&
+          [403, 404].includes(result.demoLogin),
+      );
+      return result;
+    };
+    let api = await checks();
+    pass(
+      'Clerk sign-in and authenticated API with exact issuer/audience/origin/scope',
+    );
+    verify((await page.getByLabel('Local demo resident').count()) === 0);
+    verify(
+      (await page
+        .getByText('Local scenario controls', { exact: true })
+        .count()) === 0,
+    );
+    pass('development controls absent and rejected');
     phase = 'Amazon Location style, tiles, rendered map, and attribution';
     await page.waitForFunction(
-      () => {
-        const map = document.querySelector('.map-canvas');
-        // Empty workspaces are valid. Style readiness plus successful provider
-        // tile requests and attribution below do not require any incident markers.
-        return map?.getAttribute('data-map-ready') === 'true';
-      },
+      () =>
+        document
+          .querySelector('.map-canvas')
+          ?.getAttribute('data-map-ready') === 'true',
       null,
       { timeout: 45000 },
     );
-    await page.locator('.maplibregl-ctrl-attrib').waitFor({ state: 'visible' });
-    verify(descriptorLoaded && tileLoaded);
     verify(
-      (await page.locator('.maplibregl-ctrl-attrib').innerText()).includes(
-        'Amazon Location',
-      ),
+      descriptorLoaded &&
+        tileLoaded &&
+        (await page.locator('.maplibregl-ctrl-attrib').innerText()).includes(
+          'Amazon Location',
+        ) &&
+        appErrors === 0,
     );
-    verify(appErrors === 0);
     pass(phase);
-
-    phase = 'page refresh retains the authenticated session';
+    phase = 'page refresh and Clerk session renewal';
+    const oldToken = accessToken;
+    // A real token refresh is tested across Clerk's short session-token lifetime.
+    await page.waitForTimeout(35000);
+    await page.waitForTimeout(35000);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page
       .getByRole('heading', { name: 'Neighborhood', exact: true })
       .waitFor();
-    await page.getByRole('button', { name: 'Sign out', exact: true }).waitFor();
-    verify(appErrors === 0);
+    await Promise.all(captures);
+    api = await checks();
+    verify(accessToken !== oldToken && appErrors === 0);
     pass(phase);
-
-    phase = 'Cognito logout and signed-out refresh';
+    const exportSession = async () => {
+      if (sessionOutput)
+        await writeSessionExport(sessionOutput, {
+          api_origin: c.api,
+          workspace_id: api.workspace_id,
+          user_id: api.user_id,
+          access_token: accessToken,
+          expires_at: tokenMetadata(accessToken).expiresAt,
+        });
+    };
+    await exportSession();
+    if (sessionOutput) pass('private authenticated session export');
+    const end = Date.now() + keeperSeconds * 1000;
+    while (Date.now() < end) {
+      await page.waitForTimeout(Math.min(20000, end - Date.now()));
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await page
+        .getByRole('heading', { name: 'Neighborhood', exact: true })
+        .waitFor();
+      await Promise.all(captures);
+      api = await checks();
+      await exportSession();
+    }
+    phase = 'Clerk logout and signed-out refresh';
     await page.getByRole('button', { name: 'Sign out', exact: true }).click();
-    await page.getByRole('button', { name: 'Sign in with Cognito' }).waitFor();
+    await signedOutEntry(page).waitFor();
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await page.getByRole('button', { name: 'Sign in with Cognito' }).waitFor();
+    await signedOutEntry(page).waitFor();
     verify(
-      await page.evaluate(() => !sessionStorage.getItem('nf-cognito-access')),
+      [401, 403].includes(
+        (await context.request.get(`${c.api}/api/session`)).status(),
+      ),
     );
-    verify(new URL(page.url()).origin === c.web && !new URL(page.url()).search);
-    const loggedOut = await context.request.get(`${c.api}/api/session`);
-    verify([401, 403].includes(loggedOut.status()));
     pass(phase);
     console.log(
-      sessionOutput
-        ? 'PASS AWS browser smoke: private session exported as requested; no reports or browser artifacts saved.'
-        : 'PASS AWS browser smoke: no reports submitted; no credentials or browser artifacts saved.',
+      'PASS AWS Clerk browser smoke: no reports submitted or browser artifacts saved.',
     );
     return 0;
   } catch {
-    // Never include the caught exception: Playwright can embed passwords, OAuth
-    // codes, map keys, and account-specific DOM in its standard diagnostics.
     console.error(`FAIL ${phase}. No sensitive diagnostics were recorded.`);
     return 1;
   } finally {
     await context?.close().catch(() => {});
     await browser?.close().catch(() => {});
-    clearTimeout(timeout);
+    clearTimeout(timer);
   }
 }
-
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
   process.exitCode = await runSmoke();
