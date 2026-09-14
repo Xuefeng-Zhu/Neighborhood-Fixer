@@ -76,4 +76,4 @@ The domain is the authority for permissions, material revisions, submission rese
 
 [Architecture Mermaid source](docs/architecture.mmd) · [Security and limitations](docs/SECURITY.md) · [Submission draft](docs/DEVPOST-DRAFT.md) · [Disclosure](docs/DISCLOSURE.md) · [MIT license](LICENSE)
 
-The implementation and dependency lockfiles are retained in local Git. No repository was published, no pull request was created, and no hackathon registration or submission was performed by this build.
+The implementation and dependency lockfiles are retained in Git. No pull request, hackathon registration, or hackathon submission was performed by this build.
