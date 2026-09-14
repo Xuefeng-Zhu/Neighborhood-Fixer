@@ -12,6 +12,9 @@
     "typecheck": "npm run typecheck --workspace apps/web",
     "test:web": "npm run test --workspace apps/web",
     "test:e2e": "playwright test --config apps/web/playwright.config.ts",
+    "test:aws:web": "node scripts/aws_browser_smoke.mjs",
+    "test:aws:web:config": "node --test tests/aws_frontend_support.test.mjs",
+    "build:amplify": "python3 scripts/build_amplify_artifact.py",
     "generate:api": "openapi-typescript packages/contracts/openapi.json -o apps/web/src/lib/generated-api.ts",
     "format": "prettier --write \"apps/web/src/**/*.{ts,tsx,css}\" \"apps/web/*.{ts,json,html}\" \"apps/web/tests/**/*.ts\" \"infra/cdk/**/*.{ts,json}\" \"*.json\""
   },

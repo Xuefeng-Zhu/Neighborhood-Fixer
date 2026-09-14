@@ -5,15 +5,20 @@ remain deterministic domain commands. Instantiating this module never calls AWS.
 """
 
 from __future__ import annotations
+
 import base64
 import hashlib
-from copy import deepcopy
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 import time
-from .schemas import Analysis, Routing, PreparedReport
+from copy import deepcopy
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field, create_model
+
+from .schemas import Analysis, PreparedReport, Routing
 
 
 class AgentConfigurationError(RuntimeError):
@@ -34,6 +39,16 @@ submit, publish, escalate or change destinations. Return only the required schem
 A nearby candidate is not automatically the same defect. Ask the resident.
 """
 
+REQUIRED_TOOLS = {
+    "Issue Analyst": {"query_nearby_incidents"},
+    "Routing Specialist": {
+        "lookup_jurisdiction",
+        "lookup_asset_ownership",
+        "read_agency_registry",
+    },
+    "Case Coordinator": {"prepare_submission"},
+}
+
 
 class Budget:
     def __init__(self):
@@ -47,6 +62,23 @@ class Budget:
         self.evidence_reads = set()
         self.compared_candidates = set()
         self.required_evidence = set()
+        self.successful_tools = {}
+
+    def missing_tools(self, agent_name):
+        missing = REQUIRED_TOOLS.get(agent_name, set()) - self.successful_tools.get(
+            agent_name, set()
+        )
+        if agent_name == "Issue Analyst" and not self.required_evidence.issubset(
+            self.evidence_reads
+        ):
+            missing = missing | {"read_authorized_evidence"}
+        return missing
+
+    def missing_tool_detail(self, *agent_names):
+        missing = sorted(
+            set().union(*(self.missing_tools(name) for name in agent_names))
+        )
+        return "; missing required tools: " + ", ".join(missing) if missing else ""
 
     def check(self):
         if time.monotonic() > self.deadline:
@@ -56,9 +88,9 @@ class Budget:
 
     def register_hooks(self, registry):
         from strands.hooks import (
+            AfterToolCallEvent,
             BeforeModelCallEvent,
             BeforeToolCallEvent,
-            AfterToolCallEvent,
         )
 
         registry.add_callback(BeforeModelCallEvent, self.before_model)
@@ -78,13 +110,26 @@ class Budget:
             event.cancel_tool = (
                 "Tool budget exhausted; return a clarification or handoff"
             )
+            return
+        if getattr(event.selected_tool, "tool_type", None) == "structured_output":
+            missing = self.missing_tools(event.agent.name)
+            if missing:
+                event.cancel_tool = (
+                    "Final output is not accepted yet. Call these required tools successfully first: "
+                    + ", ".join(sorted(missing))
+                    + ". Use only this authorized case context, then return the structured output."
+                )
 
     def after_tool(self, event):
+        if event.result.get("status") == "success":
+            self.successful_tools.setdefault(event.agent.name, set()).add(
+                event.tool_use["name"]
+            )
         # Never record prompts, arguments, private content, task tokens or reasoning.
         self.activity.append(
             {
                 "tool": event.tool_use["name"],
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "result": event.result.get("status", "unknown"),
                 "provider": "strands-bedrock",
             }
@@ -121,8 +166,8 @@ def _registry():
 
 
 def _model():
-    from strands.models import BedrockModel
     from botocore.config import Config
+    from strands.models import BedrockModel
 
     region, model = _configuration()
     return BedrockModel(
@@ -174,20 +219,12 @@ def _run(agent, prompt, budget):
     ):
         raise RuntimeError(
             "Strands phase did not produce validated output; retry or review the preserved case"
+            + budget.missing_tool_detail(agent.name)
         )
-    required = {
-        "Issue Analyst": {"query_nearby_incidents"},
-        "Routing Specialist": {
-            "lookup_jurisdiction",
-            "lookup_asset_ownership",
-            "read_agency_registry",
-        },
-        "Case Coordinator": {"prepare_submission"},
-    }.get(agent.name, set())
-    used = {item["tool"] for item in budget.activity if item["result"] == "success"}
-    if not required.issubset(used):
+    if budget.missing_tools(agent.name):
         raise RuntimeError(
             "Model omitted required evidence tools; no domain action is authorized"
+            + budget.missing_tool_detail(agent.name)
         )
     out = node.result.structured_output.model_dump()
     out["provenance"] = "Amazon Bedrock through Strands; not a fixture"
@@ -298,7 +335,23 @@ def _analyst(observation, evidence, candidates, principal, budget):
             query_nearby_incidents,
             compare_candidate_observations,
         ],
-        "Use read_authorized_evidence for each photo. Query nearby incidents, and compare candidates before suggesting IDs. Describe visual content only after reading photos. An absent photo means there are no visible observations.",
+        """Use read_authorized_evidence for each photo. Query nearby incidents,
+and compare candidates before suggesting IDs. Describe visual content only after
+reading photos. An absent photo means there are no visible observations.
+Observed facts describe visible appearance only. For example, a yellow tactile
+surface can be visible or appear unbroken; do not call it properly installed,
+compliant, or safe. A photo does not establish installation or safety certification.
+Separate unknowns from missing_information. Keep exact dimensions, current safety,
+authoritative asset ownership and maintenance responsibility in unknowns. Do not
+ask residents to measure hazards, inspect safety, or prove legal ownership.
+missing_information is only for resident-answerable facts actually required for
+the next step: a missing or unclear issue description/category, location not yet
+confirmed, or asset_public still unknown. If location_confirmed is true and
+asset_public is yes, accept those as resident confirmations for the fictional
+report while retaining their evidentiary limits. Do not ask for authoritative
+ownership or maintenance proof merely because no asset service is integrated.
+Do not repeat answered questions, copy unknowns into blocking clarification, or
+force an empty list when a required resident fact is genuinely missing.""",
         budget,
     )
 
@@ -307,6 +360,70 @@ def _router(observation, principal, budget):
     from strands import tool
 
     registry = _registry()
+    source_refs = tuple(
+        dict.fromkeys(
+            item["url"] if isinstance(item, dict) else item
+            for row in registry
+            for item in row.get("sources", [])
+        )
+    )
+    if not source_refs:
+        raise AgentConfigurationError("Reviewed routing source references are missing")
+    recipient_names = tuple(dict.fromkeys(row["name"] for row in registry))
+    required_fields = tuple(
+        dict.fromkeys(
+            field for row in registry for field in row.get("required_fields", [])
+        )
+    )
+    review_dates = tuple(
+        dict.fromkeys(
+            row.get("reviewed_at", row.get("review_date")) for row in registry
+        )
+    )
+    if (
+        not recipient_names
+        or not required_fields
+        or not review_dates
+        or None in review_dates
+    ):
+        raise AgentConfigurationError("Reviewed routing capabilities are incomplete")
+    # The model must select a real registry reference in its structured tool
+    # result. Strands can return schema validation feedback within the existing
+    # turn budget; an invented source never reaches the domain as valid routing.
+    grounded_schema = create_model(
+        "RegistryGroundedRouting",
+        __base__=Routing,
+        recipient=(
+            Literal[recipient_names] | None,
+            Field(
+                description="Exact agency name from read_agency_registry, never the agency ID or a paraphrase. Use null for an unresolved recipient."
+            ),
+        ),
+        supported_category=(
+            Literal[observation["category"]],
+            Field(description="The resident-confirmed category for this observation."),
+        ),
+        required_fields=(
+            list[Literal[required_fields]],
+            Field(
+                description="Exact required_fields values from the matched registry entry.",
+                max_length=16,
+            ),
+        ),
+        registry_review_date=(
+            Literal[review_dates],
+            Field(
+                description="Exact reviewed_at value from the matched registry entry."
+            ),
+        ),
+        sources=(
+            list[Literal[source_refs]],
+            Field(
+                description="Exact source url values copied from read_agency_registry. Preserve relative paths; do not replace them with titles, filenames, or invented absolute URLs.",
+                max_length=10,
+            ),
+        ),
+    )
 
     @tool
     def lookup_jurisdiction() -> dict:
@@ -360,20 +477,40 @@ def _router(observation, principal, budget):
 
     return _agent(
         "Routing Specialist",
-        Routing,
+        grounded_schema,
         [
             lookup_jurisdiction,
             lookup_asset_ownership,
             read_agency_registry,
             retrieve_official_guidance,
         ],
-        "Use jurisdiction, ownership and registry tools. Unsupported or unconfirmed routing requires clarification or assisted handoff. Recipient strings must exactly match the registry. Never imply fictional sources are official municipal policy.",
+        "Use jurisdiction, ownership and registry tools. Unsupported or unconfirmed routing requires clarification or assisted handoff. For recipient copy the registry name exactly, never its ID or a shorter agency label; use null for an unresolved recipient. Keep the confirmed category. Copy required_fields and reviewed_at exactly. For sources, copy only exact sources[].url strings returned by read_agency_registry, including relative paths; never output source titles, agency names, filenames, or expanded URLs. Never imply fictional sources are official municipal policy.",
         budget,
     )
 
 
 def _coordinator(incident, routing, principal, budget):
     from strands import tool
+
+    registry_names = tuple(dict.fromkeys(row["name"] for row in _registry()))
+    routed_recipient = routing.get("recipient")
+    if routed_recipient is not None and routed_recipient not in registry_names:
+        raise ValueError("Previous routing recipient is outside the verified registry")
+    recipient_names = (routed_recipient,) if routed_recipient else registry_names
+    grounded_schema = create_model(
+        "RegistryGroundedPreparedReport",
+        __base__=PreparedReport,
+        recipient=(
+            Literal[recipient_names] | None,
+            Field(
+                description="Copy the exact verified recipient agency name from routing; never shorten it or use its registry ID."
+            ),
+        ),
+        category=(
+            Literal[incident["category"]],
+            Field(description="Preserve the resident-confirmed category."),
+        ),
+    )
 
     @tool
     def prepare_submission() -> dict:
@@ -430,7 +567,7 @@ def _coordinator(incident, routing, principal, budget):
 
     return _agent(
         "Case Coordinator",
-        PreparedReport,
+        grounded_schema,
         [
             prepare_submission,
             request_approval,
@@ -438,7 +575,7 @@ def _coordinator(incident, routing, principal, budget):
             prepare_followup,
             request_verification,
         ],
-        "Use prepare_submission before proposing wording. Use request_approval to propose an approval. Never invent contact information or materially add facts. A CLOSED ticket is not physical resolution.",
+        "Use prepare_submission before proposing wording. Copy routing's exact recipient agency name and keep the confirmed category. Use request_approval to propose an approval. Never invent contact information or materially add facts. A CLOSED ticket is not physical resolution.",
         budget,
     )
 
@@ -483,13 +620,7 @@ def analyze(
     return output
 
 
-def route(observation: dict, principal: dict) -> dict:
-    _validate_context(observation, principal)
-    budget = Budget()
-    output = _run(
-        _router(observation, principal, budget), json.dumps(observation), budget
-    )
-    registry = _registry()
+def _validate_routing_output(observation, output, registry):
     allowed_names = {r["name"] for r in registry}
     allowed_sources = {
         s["url"] if isinstance(s, dict) else s
@@ -500,15 +631,20 @@ def route(observation: dict, principal: dict) -> dict:
         raise ValueError("Model returned a source outside the verified registry")
     if output["recipient"] is not None and output["recipient"] not in allowed_names:
         raise ValueError("Model changed the configured recipient")
-    valid = any(
-        r["coverage"]["bbox"][0] <= observation["longitude"] <= r["coverage"]["bbox"][2]
+    matched = [
+        r
+        for r in registry
+        if r["name"] == output["recipient"]
+        and r["coverage"]["bbox"][0]
+        <= observation["longitude"]
+        <= r["coverage"]["bbox"][2]
         and r["coverage"]["bbox"][1]
         <= observation["latitude"]
         <= r["coverage"]["bbox"][3]
         and observation["category"] in r["supported_categories"]
         and r.get("automation_authorized")
-        for r in registry
-    )
+    ]
+    valid = bool(matched)
     valid = (
         valid
         and observation.get("location_confirmed")
@@ -516,7 +652,30 @@ def route(observation: dict, principal: dict) -> dict:
     )
     if output["supported"] and not valid:
         raise ValueError("Model attempted unsupported or unconfirmed routing")
+    if output.get("supported_category") != observation["category"]:
+        raise ValueError("Model changed the confirmed routing category")
+    if output["supported"]:
+        matched_sources = {
+            item["url"] if isinstance(item, dict) else item
+            for row in matched
+            for item in row.get("sources", [])
+        }
+        if not output["sources"] or not set(output["sources"]).issubset(
+            matched_sources
+        ):
+            raise ValueError(
+                "Model routing sources do not support the matched recipient"
+            )
     return output
+
+
+def route(observation: dict, principal: dict) -> dict:
+    _validate_context(observation, principal)
+    budget = Budget()
+    output = _run(
+        _router(observation, principal, budget), json.dumps(observation), budget
+    )
+    return _validate_routing_output(observation, output, _registry())
 
 
 def prepare(incident: dict, routing: dict, principal: dict) -> dict:
@@ -558,17 +717,17 @@ def prepare(incident: dict, routing: dict, principal: dict) -> dict:
         if not node or not getattr(node.result, "structured_output", None):
             raise RuntimeError(
                 "Routing and report composition did not finish; no action authorized"
+                + budget.missing_tool_detail("Routing Specialist", "Case Coordinator")
             )
         outputs[name] = node.result.structured_output.model_dump()
-    used = {a["tool"] for a in budget.activity if a["result"] == "success"}
-    if not {
-        "lookup_jurisdiction",
-        "lookup_asset_ownership",
-        "read_agency_registry",
-        "prepare_submission",
-    }.issubset(used):
-        raise ValueError("Specialists omitted required routing or preparation tools")
-    checked = outputs["routing_check"]
+    missing_detail = budget.missing_tool_detail(
+        "Routing Specialist", "Case Coordinator"
+    )
+    if missing_detail:
+        raise ValueError(
+            "Specialists omitted required routing or preparation tools" + missing_detail
+        )
+    checked = _validate_routing_output(incident, outputs["routing_check"], _registry())
     if not checked["supported"] or checked["recipient"] != routing.get("recipient"):
         raise ValueError(
             "Routing changed during report preparation; resident review is required"
@@ -576,6 +735,8 @@ def prepare(incident: dict, routing: dict, principal: dict) -> dict:
     output = outputs["coordinator"]
     if output["recipient"] != routing.get("recipient"):
         raise ValueError("Model attempted to alter configured recipient")
+    if output["category"] != incident["category"]:
+        raise ValueError("Model attempted to alter confirmed report category")
     output.update(
         provenance="Amazon Bedrock through Strands routing-to-coordinator graph; not a fixture",
         agent_activity=budget.activity,

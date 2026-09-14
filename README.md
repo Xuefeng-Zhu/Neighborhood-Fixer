@@ -52,7 +52,7 @@ The Python integration tests start their own isolated API, portal and worker wit
 
 ## AWS mode
 
-Real Strands specialists, Bedrock configuration, AgentCore Runtime/Browser adapters, shared DynamoDB domain storage, Step Functions Standard callback orchestration, and CDK infrastructure are included. **Nothing has been deployed to AWS.** Synthesis verifies resource definitions; it does not verify account permissions, models, hosted authentication, containers, remote browser uploads or production behavior. The current environment also lacks a running Docker daemon, so deployment container builds remain unverified.
+The application is deployed in **us-west-2** at [Neighborhood Fixer](https://main.d12il66dljooo6.amplifyapp.com). Hosted Cognito login, maps, storage privacy, real Bedrock photo analysis, routing and report preparation passed. Two synthetic residents linked their observations to one unchanged draft, with private photos and drafts protected. The cloud check stopped before approval. **Full AWS behavior is not yet verified:** AgentCore Browser automation streams return HTTP404 before navigation, blocking submission and receipt verification. The initial AWS account-verification gate has cleared. See [current AWS status](docs/AWS-STATUS.md) for precise results and the owner sign-in step.
 
 See [deployment/teardown](docs/aws-deployment.md), [SDK/reference verification](docs/aws-api-verification.md), [access patterns](docs/aws-access-patterns.md), and [configuration](docs/CONFIGURATION.md). Deploy only after the owner explicitly selects and authorizes an AWS account/environment. AWS errors remain visible; there is no silent fixture fallback. The receiving agency stays fictional. Real municipal submissions are disabled.
 

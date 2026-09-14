@@ -1,0 +1,27 @@
+# Keep application image build contexts explicit and free of local user state.
+**
+!pyproject.toml
+!uv.lock
+!services/
+!services/**
+!fixtures/
+!fixtures/**
+!infra/
+infra/**
+!infra/cdk/
+infra/cdk/**
+!infra/cdk/bootstrap.py
+!infra/cdk/Dockerfile.lambda
+!infra/cdk/Dockerfile.runtime
+
+# Defense in depth inside the allowed source directories.
+**/.git
+**/.env*
+**/.local
+**/.venv
+**/node_modules
+**/cdk.out
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache

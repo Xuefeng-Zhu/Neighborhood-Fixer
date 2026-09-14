@@ -24,11 +24,59 @@ export class NeighborhoodFixerStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
     const root = path.resolve(__dirname, '../..');
-    const frontendOrigin = new cdk.CfnParameter(this, 'FrontendOrigin', {
+    const customFrontendOrigin = new cdk.CfnParameter(this, 'FrontendOrigin', {
       type: 'String',
-      description: 'Exact deployed frontend HTTPS origin; no trailing slash',
-      allowedPattern: 'https://[a-zA-Z0-9.-]+',
+      default: '',
+      description:
+        'Optional custom HTTPS origin without trailing slash; empty uses the generated Amplify main branch URL',
+      allowedPattern: '^$|https://[a-zA-Z0-9.-]+',
     });
+    // Keep the app independent of backend resources. Branch settings may refer
+    // to them after its generated domain has supplied CORS and Cognito URLs.
+    const hosting = new amplify.CfnApp(this, 'Hosting', {
+      name: 'Neighborhood Fixer',
+      platform: 'WEB',
+      buildSpec:
+        'version: 1\nfrontend:\n  phases:\n    preBuild:\n      commands:\n        - npm ci\n    build:\n      commands:\n        - npm run build\n  artifacts:\n    baseDirectory: apps/web/dist\n    files:\n      - "**/*"\n  cache:\n    paths:\n      - node_modules/**/*\n',
+      customRules: [
+        { source: '/<*>', target: '/index.html', status: '404-200' },
+      ],
+    });
+    const useCustomFrontendOrigin = new cdk.CfnCondition(
+      this,
+      'UseCustomFrontendOrigin',
+      {
+        expression: cdk.Fn.conditionNot(
+          cdk.Fn.conditionEquals(customFrontendOrigin.valueAsString, ''),
+        ),
+      },
+    );
+    const frontendOrigin = cdk.Fn.conditionIf(
+      useCustomFrontendOrigin.logicalId,
+      customFrontendOrigin.valueAsString,
+      cdk.Fn.join('', ['https://main.', hosting.attrDefaultDomain]),
+    ).toString();
+    const workerConcurrency = new cdk.CfnParameter(
+      this,
+      'WorkerReservedConcurrency',
+      {
+        type: 'Number',
+        default: 0,
+        minValue: 0,
+        maxValue: 10,
+        description:
+          'Optional worker reserved concurrency; 0 leaves it unreserved for accounts with low Lambda concurrency quotas',
+      },
+    );
+    const reserveWorkerConcurrency = new cdk.CfnCondition(
+      this,
+      'ReserveWorkerConcurrency',
+      {
+        expression: cdk.Fn.conditionNot(
+          cdk.Fn.conditionEquals(workerConcurrency.valueAsNumber, 0),
+        ),
+      },
+    );
     const modelId = new cdk.CfnParameter(this, 'BedrockModelId', {
       type: 'String',
       default: 'us.amazon.nova-2-lite-v1:0',
@@ -106,8 +154,8 @@ export class NeighborhoodFixerStack extends cdk.Stack {
           cognito.OAuthScope.EMAIL,
           cognito.OAuthScope.PROFILE,
         ],
-        callbackUrls: [cdk.Fn.join('', [frontendOrigin.valueAsString, '/'])],
-        logoutUrls: [cdk.Fn.join('', [frontendOrigin.valueAsString, '/'])],
+        callbackUrls: [cdk.Fn.join('', [frontendOrigin, '/'])],
+        logoutUrls: [cdk.Fn.join('', [frontendOrigin, '/'])],
       },
       preventUserExistenceErrors: true,
     });
@@ -126,7 +174,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       NF_TABLE_NAME: records.tableName,
       NF_EVIDENCE_BUCKET: evidence.bucketName,
       NF_DATA_DIR: '/tmp/neighborhood-fixer',
-      NF_ALLOWED_ORIGINS: frontendOrigin.valueAsString,
+      NF_ALLOWED_ORIGINS: frontendOrigin,
       NF_PORTAL_SECRET_ARN: secret.secretArn,
     };
     const log = (name: string) =>
@@ -145,6 +193,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
           file: 'infra/cdk/Dockerfile.lambda',
           cmd: [handler],
           platform: assets.Platform.LINUX_ARM64,
+          ignoreMode: cdk.IgnoreMode.DOCKER,
           exclude: [
             '.git',
             '.venv',
@@ -167,7 +216,6 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         environment,
         logGroup: log(name + 'Logs'),
         tracing: lambda.Tracing.ACTIVE,
-        reservedConcurrentExecutions: name === 'Worker' ? 3 : 10,
       });
     const portal = makeLambda('Portal', 'services.portal.main.handler', {
       ...common,
@@ -200,6 +248,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       description:
         'Bounded fictional portal automation; no persistent recording of resident data',
     });
+    browser.node.addDependency(browserRole);
     const runtimeRole = new iam.Role(this, 'RuntimeRole', {
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
         conditions: {
@@ -288,6 +337,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       directory: root,
       file: 'infra/cdk/Dockerfile.runtime',
       platform: assets.Platform.LINUX_ARM64,
+      ignoreMode: cdk.IgnoreMode.DOCKER,
       exclude: [
         '.git',
         '.venv',
@@ -328,6 +378,9 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         maxLifetime: 600,
       },
     });
+    // AgentCore validates ECR access during creation. RoleArn orders the role
+    // alone; include its policy resources so image validation cannot race them.
+    runtime.node.addDependency(runtimeRole);
     const workflowName = 'NeighborhoodFixerWorkflow';
     const workflowArn = this.formatArn({
       service: 'states',
@@ -351,6 +404,15 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         NF_SECRET_BOOTSTRAP: '1',
       },
       300,
+    );
+    const workerResource = worker.node.defaultChild as lambda.CfnFunction;
+    workerResource.addPropertyOverride(
+      'ReservedConcurrentExecutions',
+      cdk.Fn.conditionIf(
+        reserveWorkerConcurrency.logicalId,
+        workerConcurrency.valueAsNumber,
+        cdk.Aws.NO_VALUE,
+      ),
     );
     records.grantReadWriteData(worker);
     evidence.grantReadWrite(worker);
@@ -481,7 +543,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
     );
     const http = new apigw.HttpApi(this, 'HttpApi', {
       corsPreflight: {
-        allowOrigins: [frontendOrigin.valueAsString],
+        allowOrigins: [frontendOrigin],
         allowMethods: [
           apigw.CorsHttpMethod.GET,
           apigw.CorsHttpMethod.POST,
@@ -507,6 +569,14 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       integration,
       authorizer,
     });
+    // A method-specific route takes precedence over the authenticated ANY
+    // route, allowing API Gateway's configured CORS preflight response.
+    http.addRoutes({
+      path: '/api/{proxy+}',
+      methods: [apigw.HttpMethod.OPTIONS],
+      integration,
+      authorizer: new apigw.HttpNoneAuthorizer(),
+    });
     http.addRoutes({
       path: '/api/health',
       methods: [apigw.HttpMethod.GET],
@@ -522,7 +592,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       restrictions: {
         allowActions: ['geo:GetMap*'],
         allowResources: [map.attrArn],
-        allowReferers: [cdk.Fn.join('', [frontendOrigin.valueAsString, '/*'])],
+        allowReferers: [cdk.Fn.join('', [frontendOrigin, '/*'])],
       },
     });
     api.addToRolePolicy(
@@ -533,34 +603,25 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         ],
       }),
     );
-    const hosting = new amplify.CfnApp(this, 'Hosting', {
-      name: 'Neighborhood Fixer',
-      platform: 'WEB',
-      buildSpec:
-        'version: 1\nfrontend:\n  phases:\n    preBuild:\n      commands:\n        - npm ci\n    build:\n      commands:\n        - npm run build\n  artifacts:\n    baseDirectory: apps/web/dist\n    files:\n      - "**/*"\n  cache:\n    paths:\n      - node_modules/**/*\n',
-      customRules: [
-        { source: '/<*>', target: '/index.html', status: '404-200' },
-      ],
+    new amplify.CfnBranch(this, 'HostingBranch', {
+      appId: hosting.attrAppId,
+      branchName: 'main',
+      enableAutoBuild: false,
+      stage: 'DEVELOPMENT',
       environmentVariables: [
-        { name: 'VITE_NF_MODE', value: 'aws' },
         { name: 'VITE_API_BASE_URL', value: http.apiEndpoint },
         { name: 'VITE_AWS_REGION', value: this.region },
         { name: 'VITE_COGNITO_CLIENT_ID', value: client.userPoolClientId },
         { name: 'VITE_COGNITO_DOMAIN', value: domain.baseUrl() },
         {
           name: 'VITE_COGNITO_REDIRECT_URI',
-          value: cdk.Fn.join('', [frontendOrigin.valueAsString, '/']),
+          value: cdk.Fn.join('', [frontendOrigin, '/']),
         },
         { name: 'VITE_LOCATION_MAP_NAME', value: map.ref },
       ],
     });
-    new amplify.CfnBranch(this, 'HostingBranch', {
-      appId: hosting.attrAppId,
-      branchName: 'main',
-      enableAutoBuild: false,
-      stage: 'DEVELOPMENT',
-    });
     for (const [name, value] of Object.entries({
+      WebUrl: frontendOrigin,
       ApiUrl: http.apiEndpoint,
       PortalUrl: portalUrl.url,
       PortalSecretArn: secret.secretArn,

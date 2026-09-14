@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { App } from 'aws-cdk-lib';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { App, CliCredentialsStackSynthesizer } from 'aws-cdk-lib';
 import { Template, Match } from 'aws-cdk-lib/assertions';
 import { NeighborhoodFixerStack } from '../stack';
+import { NeighborhoodFixerAssetStack } from '../asset-stack';
 const app = new App();
 const stack = new NeighborhoodFixerStack(app, 'TestStack', {
   env: { account: '111122223333', region: 'us-west-2' },
@@ -49,6 +52,26 @@ test('JWT authorizer protects application API', () => {
     AdminCreateUserConfig: { AllowAdminCreateUserOnly: true },
   });
 });
+test('CORS preflight is unauthenticated while application requests remain JWT protected', () => {
+  template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+    AuthorizationType: 'NONE',
+    AuthorizerId: Match.absent(),
+    RouteKey: 'OPTIONS /api/{proxy+}',
+    Target: Match.anyValue(),
+  });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
+    AuthorizationType: 'JWT',
+    AuthorizerId: Match.anyValue(),
+    RouteKey: 'ANY /api/{proxy+}',
+  });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
+    CorsConfiguration: Match.objectLike({
+      AllowHeaders: ['authorization', 'content-type'],
+      AllowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+      AllowOrigins: Match.anyValue(),
+    }),
+  });
+});
 test('map key and execution environments are restricted', () => {
   template.hasResourceProperties('AWS::Location::APIKey', {
     Restrictions: {
@@ -63,8 +86,57 @@ test('map key and execution environments are restricted', () => {
     assert.equal(fn.Properties.Environment.Variables.NF_MODE, 'aws');
     assert.equal(fn.Properties.Environment.Variables.NF_ENVIRONMENT, 'demo');
     assert.equal(fn.Properties.Architectures[0], 'arm64');
+    assert.equal(fn.Properties.Environment.Variables.AWS_REGION, undefined);
+    assert.equal(
+      fn.Properties.Environment.Variables.AWS_DEFAULT_REGION,
+      undefined,
+    );
   }
   template.resourceCountIs('AWS::EC2::VPC', 0);
+});
+
+test('AgentCore creation waits for execution roles and attached ECR permissions', () => {
+  const policies = template.findResources('AWS::IAM::Policy');
+  for (const [type, roleProperty] of [
+    ['AWS::BedrockAgentCore::Runtime', 'RoleArn'],
+    ['AWS::BedrockAgentCore::BrowserCustom', 'ExecutionRoleArn'],
+  ]) {
+    for (const resource of Object.values(template.findResources(type))) {
+      const roleId = resource.Properties[roleProperty]['Fn::GetAtt'][0];
+      const dependencies = resource.DependsOn || [];
+      assert.ok(
+        dependencies.includes(roleId),
+        `${type} must wait for its role`,
+      );
+      for (const [policyId, policy] of Object.entries(policies)) {
+        if (!policy.Properties.Roles?.some((role: any) => role.Ref === roleId))
+          continue;
+        assert.ok(
+          dependencies.includes(policyId),
+          `${type} must wait for ${policyId}`,
+        );
+      }
+      if (type !== 'AWS::BedrockAgentCore::Runtime') continue;
+      const statements = Object.values(policies)
+        .filter((policy) =>
+          policy.Properties.Roles?.some((role: any) => role.Ref === roleId),
+        )
+        .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+      const allows = (action: string) =>
+        statements.find(
+          (statement: any) =>
+            statement.Effect === 'Allow' &&
+            [statement.Action].flat().includes(action),
+        );
+      assert.equal(allows('ecr:GetAuthorizationToken')?.Resource, '*');
+      for (const action of [
+        'ecr:BatchGetImage',
+        'ecr:GetDownloadUrlForLayer',
+      ]) {
+        assert.match(JSON.stringify(allows(action)?.Resource), /:repository\//);
+      }
+    }
+  }
 });
 test('Cognito callback and logout match and secret bootstrap grants stay aligned', () => {
   const clients = Object.values(
@@ -112,4 +184,155 @@ test('cloud ticket status controls require an explicit portal-only opt-in', () =
     }
   }
   template.hasOutput('PortalSecretArn', { Value: Match.anyValue() });
+});
+
+test('generated Amplify origin bootstraps all consumers without a dependency cycle', () => {
+  template.hasParameter('FrontendOrigin', { Type: 'String', Default: '' });
+  const apps = template.findResources('AWS::Amplify::App');
+  const appId = Object.keys(apps)[0];
+  assert.equal(apps[appId].Properties.EnvironmentVariables, undefined);
+  const origin = {
+    'Fn::If': [
+      'UseCustomFrontendOrigin',
+      { Ref: 'FrontendOrigin' },
+      {
+        'Fn::Join': [
+          '',
+          ['https://main.', { 'Fn::GetAtt': [appId, 'DefaultDomain'] }],
+        ],
+      },
+    ],
+  };
+  template.hasOutput('WebUrl', { Value: origin });
+  template.hasResourceProperties('AWS::ApiGatewayV2::Api', {
+    CorsConfiguration: Match.objectLike({ AllowOrigins: [origin] }),
+  });
+  template.hasResourceProperties('AWS::Amplify::Branch', {
+    BranchName: 'main',
+    EnvironmentVariables: Match.arrayWith([
+      { Name: 'VITE_API_BASE_URL', Value: Match.anyValue() },
+      {
+        Name: 'VITE_COGNITO_REDIRECT_URI',
+        Value: { 'Fn::Join': ['', [origin, '/']] },
+      },
+    ]),
+  });
+});
+
+test('worker concurrency reservation is optional for accounts with low quotas', () => {
+  template.hasParameter('WorkerReservedConcurrency', {
+    Type: 'Number',
+    Default: 0,
+    MinValue: 0,
+    MaxValue: 10,
+  });
+  const functions = Object.values(
+    template.findResources('AWS::Lambda::Function'),
+  ) as any[];
+  for (const fn of functions) {
+    if (
+      fn.Properties.ImageConfig.Command[0] ===
+      'services.agents.aws_workflow.handler'
+    ) {
+      assert.deepEqual(fn.Properties.ReservedConcurrentExecutions, {
+        'Fn::If': [
+          'ReserveWorkerConcurrency',
+          { Ref: 'WorkerReservedConcurrency' },
+          { Ref: 'AWS::NoValue' },
+        ],
+      });
+    } else {
+      assert.equal(fn.Properties.ReservedConcurrentExecutions, undefined);
+    }
+  }
+});
+
+test('application asset stack creates storage without persistent deployment roles', () => {
+  const assetApp = new App();
+  const assetStack = new NeighborhoodFixerAssetStack(assetApp, 'AssetTest', {
+    env: { account: '111122223333', region: 'us-west-2' },
+    bucketName: 'nf-assets-111122223333-us-west-2',
+    repositoryName: 'neighborhood-fixer-assets',
+  });
+  const assets = Template.fromStack(assetStack);
+  assets.resourceCountIs('AWS::IAM::Role', 0);
+  assets.hasResourceProperties('AWS::S3::Bucket', {
+    BucketName: 'nf-assets-111122223333-us-west-2',
+    VersioningConfiguration: { Status: 'Enabled' },
+    PublicAccessBlockConfiguration: {
+      BlockPublicAcls: true,
+      BlockPublicPolicy: true,
+      IgnorePublicAcls: true,
+      RestrictPublicBuckets: true,
+    },
+  });
+  assets.hasResourceProperties('AWS::ECR::Repository', {
+    ImageScanningConfiguration: { ScanOnPush: true },
+    ImageTagMutability: 'IMMUTABLE',
+    LifecyclePolicy: Match.anyValue(),
+  });
+  for (const resource of Object.values(
+    assets.findResources('AWS::S3::Bucket'),
+  ).concat(Object.values(assets.findResources('AWS::ECR::Repository'))))
+    assert.equal(resource.DeletionPolicy, 'Retain');
+  const artifact = assetApp.synth().getStackArtifact(assetStack.artifactId);
+  assert.equal(artifact.assumeRoleArn, undefined);
+  assert.equal(artifact.cloudFormationExecutionRoleArn, undefined);
+  assert.equal(artifact.requiresBootstrapStackVersion, undefined);
+});
+
+test('current-credential synthesis has no bootstrap role assumption or SSM prerequisite', () => {
+  const directApp = new App();
+  const directStack = new NeighborhoodFixerStack(directApp, 'DirectTest', {
+    env: { account: '111122223333', region: 'us-west-2' },
+    synthesizer: new CliCredentialsStackSynthesizer({
+      fileAssetsBucketName: 'nf-assets-111122223333-us-west-2',
+      imageAssetsRepositoryName: 'neighborhood-fixer-assets',
+    }),
+  });
+  const assembly = directApp.synth();
+  const artifact = assembly.getStackArtifact(directStack.artifactId);
+  assert.equal(artifact.assumeRoleArn, undefined);
+  assert.equal(artifact.cloudFormationExecutionRoleArn, undefined);
+  assert.equal(artifact.requiresBootstrapStackVersion, undefined);
+  assert.equal(artifact.template.Parameters?.BootstrapVersion, undefined);
+  const manifest = JSON.parse(
+    fs.readFileSync(
+      path.join(assembly.directory, 'DirectTest.assets.json'),
+      'utf8',
+    ),
+  );
+  for (const asset of Object.values(manifest.dockerImages) as any[]) {
+    for (const destination of Object.values(asset.destinations) as any[]) {
+      assert.equal(destination.assumeRoleArn, undefined);
+    }
+    const directory = path.join(assembly.directory, asset.source.directory);
+    for (const filename of fs.readdirSync(directory, {
+      recursive: true,
+    }) as string[]) {
+      if (!fs.statSync(path.join(directory, filename)).isFile()) continue;
+      assert.ok(
+        ['.dockerignore', 'pyproject.toml', 'uv.lock'].includes(filename) ||
+          /^(services|fixtures|infra\/cdk)\//.test(filename),
+        `Unexpected deployment asset file: ${filename}`,
+      );
+      assert.doesNotMatch(
+        filename,
+        /(^|\/)(\.env[^/]*|\.local|\.git|\.venv|__pycache__|node_modules|cdk\.out)(\/|$)/,
+      );
+    }
+    for (const filename of [
+      'pyproject.toml',
+      'uv.lock',
+      'infra/cdk/bootstrap.py',
+      'services/api/main.py',
+      'services/agents/runtime.py',
+      'fixtures/agency-registry.json',
+    ]) {
+      assert.ok(
+        fs.existsSync(path.join(directory, filename)),
+        `Missing deployment source: ${filename}`,
+      );
+    }
+  }
 });

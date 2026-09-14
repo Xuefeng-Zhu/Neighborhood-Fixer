@@ -1,10 +1,12 @@
 # Progress
 
-- Complete: persisted local API, restartable worker and fictional agency portal; one-command startup verified.
-- Complete: two resident observations, one exact approval and browser submission, private receipt, independent agency status and resident verification.
-- Complete: lost-receipt reconciliation, concurrency and authorization boundaries, separate summary/photo publication, desktop/mobile UI verification.
-- Complete: real bounded Strands/Bedrock path, AWS adapters, Cognito, DynamoDB/S3, Step Functions, AgentCore and CDK configuration; 46 resources synthesized.
+- Complete locally: persisted API, restartable worker and fictional agency portal; one-command startup verified.
+- Complete locally: two resident observations, one exact approval and browser submission, private receipt, independent agency status and resident verification.
+- Complete locally: lost-receipt reconciliation, concurrency and authorization boundaries, separate summary/photo publication, desktop/mobile UI verification.
+- Deployed: Strands/Bedrock agents, Cognito, DynamoDB/S3, Step Functions, AgentCore Runtime/Browser resources and CDK configuration; 48 main resources synthesized plus the dedicated asset stack. Amplify hosts the frontend in the authorized Oregon environment.
 - Complete: original synthetic assets, generated API types, pinned lockfiles, security/configuration/deployment guides, five-minute demo and unpublished Devpost draft.
-- Validation: 75 Python tests, 11 frontend tests, 2 browser journeys and 6 CDK assertions passed; 4 live AWS smoke tests explicitly skipped.
-- Cloud verification blocked on a running Docker daemon for image builds and an explicitly authorized AWS account/environment deployment. No AWS deployment, municipal submission, remote publication or hackathon submission occurred.
-- No Git remote existed to fetch. Implementation and lockfiles are saved on a local codex branch.
+- Validation: 106 Python tests, 11 frontend component tests, 2 local browser journeys, 9 AWS frontend-helper checks and 12 CDK assertions passed. The isolated Python suite skips four opt-in live tests; separate real-cloud results are recorded below.
+- Verified in AWS: both synthetic residents passed hosted Cognito PKCE, authenticated API, disabled local controls, Location maps, refresh and logout. Storage privacy, health and CORS passed. Real photos were analyzed through S3, Step Functions and Bedrock/Strands Runtime; exact routing and report preparation succeeded. Two observations share one canonical case and unchanged draft; neighboring residents cannot read private photos or drafts. The cloud check stopped before approval with zero submission or closure actions.
+- Remaining: custom and built-in AgentCore Browser streams return HTTP404 before navigation despite READY/ENABLED metadata; full cloud submission, attachment transfer, receipt, closure and verification remain blocked. No established IAM or credential mismatch explains it. A private support draft is prepared and unsent. The owner must complete the first password change.
+- Latest backend update completed at 2026-09-14 08:05:46 UTC; post-update app/API/session/CORS/portal checks passed at 08:07 UTC. The earlier Bedrock verification gate and application output-validation issues were resolved. No real municipal or hackathon submission occurred.
+- No Git remote existed to fetch. Implementation and lockfiles are saved on a local codex branch; no repository publication or push occurred.
