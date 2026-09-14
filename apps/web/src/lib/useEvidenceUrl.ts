@@ -1,42 +1,33 @@
 import { useEffect, useState } from 'react';
-import { apiUrl, getAccessToken } from './auth';
-/** AWS evidence is fetched with the access token; bearer values never go into URLs. */
+import { useApi } from './api-context';
+/** Private evidence uses the same fresh token and cancellation scope as JSON requests. */
 export function useEvidenceUrl(source?: string) {
-  const token = getAccessToken();
+  const api = useApi();
   const privateApi = source?.startsWith('/api/');
-  const [resolved, setResolved] = useState<string>();
+  const [resolved, setResolved] = useState<{ source: string; url: string }>();
   useEffect(() => {
-    if (!source || !privateApi || !token) {
-      setResolved(undefined);
-      return;
-    }
+    setResolved(undefined);
+    if (!source || !privateApi) return;
     const controller = new AbortController();
     let objectUrl: string | undefined;
-    fetch(apiUrl(source), {
-      headers: { Authorization: `Bearer ${token}` },
-      credentials: 'omit',
-      signal: controller.signal,
-    })
-      .then((response) => {
-        if (!response.ok)
-          throw new Error('Evidence permission or download failed');
-        return response.blob();
-      })
+    api
+      .evidence(source, controller.signal)
       .then((blob) => {
+        if (controller.signal.aborted) return;
         objectUrl = URL.createObjectURL(blob);
-        setResolved(objectUrl);
+        setResolved({ source, url: objectUrl });
       })
-      .catch(() => setResolved(undefined));
+      .catch(() => {
+        if (!controller.signal.aborted) setResolved(undefined);
+      });
     return () => {
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [source, privateApi, token]);
-  return !source
-    ? undefined
-    : privateApi && token
-      ? resolved
-      : privateApi
-        ? apiUrl(source)
-        : source;
+  }, [source, privateApi, api]);
+  return privateApi
+    ? resolved && resolved.source === source
+      ? resolved.url
+      : undefined
+    : source;
 }

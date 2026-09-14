@@ -1,5 +1,6 @@
 """Offline regression tests for the deployment artifact boundary, no AWS requests."""
 
+import base64
 import json
 import zipfile
 from subprocess import CompletedProcess
@@ -18,8 +19,10 @@ from scripts.build_amplify_artifact import (
 OUTPUTS = {
     "WebUrl": "https://main.example.amplifyapp.com",
     "ApiUrl": "https://example.execute-api.us-west-2.amazonaws.com",
-    "CognitoDomain": "https://example.auth.us-west-2.amazoncognito.com",
-    "UserPoolClientId": "exampleclient123",
+    "ClerkIssuerUrl": "https://example.clerk.accounts.dev",
+    "ClerkPublishableKey": "pk_test_"
+    + base64.urlsafe_b64encode(b"example.clerk.accounts.dev$").decode().rstrip("="),
+    "AuthAudience": "neighborhood-fixer-api",
     "LocationMapName": "NeighborhoodFixer",
 }
 PUBLIC_ENV = {
@@ -53,7 +56,8 @@ def test_reads_cdk_and_cloudformation_outputs_without_guessing_stack():
 
 def test_sets_exact_callback_and_requires_restricted_key_and_deployed_origins():
     frontend = frontend_environment(OUTPUTS, PUBLIC_ENV)
-    assert frontend["VITE_COGNITO_REDIRECT_URI"] == OUTPUTS["WebUrl"] + "/"
+    assert frontend["VITE_CLERK_PUBLISHABLE_KEY"] == OUTPUTS["ClerkPublishableKey"]
+    assert not any("COGNITO" in name for name in frontend)
     assert frontend["VITE_AWS_REGION"] == "us-west-2"
     with pytest.raises(BuildError, match="NF_LOCATION_API_KEY"):
         frontend_environment(OUTPUTS, {"AWS_REGION": "us-west-2"})
@@ -120,6 +124,7 @@ def test_main_keeps_aws_secrets_out_of_build_process_and_map_key_out_of_manifest
     monkeypatch.setenv("AWS_REGION", PUBLIC_ENV["AWS_REGION"])
     monkeypatch.setenv("NF_LOCATION_API_KEY", PUBLIC_ENV["NF_LOCATION_API_KEY"])
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret-placeholder")
+    monkeypatch.setenv("CLERK_SECRET_KEY", "clerk-secret-placeholder")
     monkeypatch.setenv("NF_AWS_SMOKE_PASSWORD", "account-secret-placeholder")
     monkeypatch.setenv("VITE_API_BASE_URL", "https://wrong.example.com")
     calls = []
@@ -133,13 +138,31 @@ def test_main_keeps_aws_secrets_out_of_build_process_and_map_key_out_of_manifest
     assert calls[0]["VITE_LOCATION_API_KEY"] == PUBLIC_ENV["NF_LOCATION_API_KEY"]
     assert "AWS_SECRET_ACCESS_KEY" not in calls[0]
     assert "NF_AWS_SMOKE_PASSWORD" not in calls[0]
+    assert "CLERK_SECRET_KEY" not in calls[0]
     manifest = destination.with_suffix(".manifest.json").read_text()
     logs = capsys.readouterr()
     for value in (
         PUBLIC_ENV["NF_LOCATION_API_KEY"],
         "aws-secret-placeholder",
         "account-secret-placeholder",
+        "clerk-secret-placeholder",
     ):
         assert value not in manifest
         assert value not in logs.out + logs.err
     assert json.loads(manifest)["frontend"]["web_url"] == OUTPUTS["WebUrl"]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "sk_test_private",
+        "pk_test_invalid",
+        "pk_live_wrong",
+        "pk_test_"
+        + base64.urlsafe_b64encode(b"other.clerk.accounts.dev$").decode().rstrip("="),
+    ],
+)
+def test_clerk_configuration_cannot_bind_a_different_instance_or_secret_key(key):
+    with pytest.raises(BuildError) as error:
+        frontend_environment({**OUTPUTS, "ClerkPublishableKey": key}, PUBLIC_ENV)
+    assert key not in str(error.value)

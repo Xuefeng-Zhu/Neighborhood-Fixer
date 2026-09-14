@@ -3,6 +3,8 @@ from pathlib import Path
 import hashlib
 import os
 import uuid
+import time
+from datetime import datetime
 
 from fastapi import FastAPI, Depends, Request, Response, UploadFile, File
 from fastapi.exceptions import RequestValidationError
@@ -27,6 +29,7 @@ from .models import (
     OperationResponse,
     ScenarioInput,
     SessionRequest,
+    SessionResponse,
     SubmissionDraft,
     SubscriptionInput,
     TicketStatusInput,
@@ -56,6 +59,8 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
             401: {"model": ErrorEnvelope},
             403: {"model": ErrorEnvelope},
             409: {"model": ErrorEnvelope},
+            429: {"model": ErrorEnvelope},
+            503: {"model": ErrorEnvelope},
         },
     )
     app.state.domain, app.state.settings = domain, settings
@@ -64,7 +69,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
         allow_origins=list(settings.allowed_origins),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH"],
-        allow_headers=["Content-Type", "Authorization"],
+        allow_headers=["Content-Type", "Authorization", "Idempotency-Key"],
     )
 
     def backend():
@@ -111,8 +116,28 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
                     "message": exc.message,
                     "retryable": exc.retryable,
                     "correlation_id": getattr(request.state, "correlation_id", ident()),
+                    **(
+                        {"details": exc.details}
+                        if getattr(exc, "details", None)
+                        else {}
+                    ),
                 }
             },
+            headers={
+                "Retry-After": str(
+                    max(
+                        1,
+                        int(
+                            datetime.fromisoformat(
+                                exc.details["reset_at"].replace("Z", "+00:00")
+                            ).timestamp()
+                            - time.time()
+                        ),
+                    )
+                )
+            }
+            if exc.status == 429 and getattr(exc, "details", None)
+            else {},
             status_code=exc.status,
         )
 
@@ -171,52 +196,19 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
             ):
                 raise DomainError("UNAUTHENTICATED", "Invalid session.", 401)
             return value
-        # Only the trusted Lambda adapter event may carry API Gateway authorizer claims.
-        # Ordinary HTTP headers such as X-User-ID are deliberately ignored.
+        # Only API Gateway's verified JWT claims are trusted. Headers never carry identity.
         event = request.scope.get("aws.event", {})
-        authorizer = event.get("requestContext", {}).get("authorizer", {})
-        claims = authorizer.get("jwt", {}).get("claims") or authorizer.get("claims")
-        if not claims or not claims.get("sub"):
+        claims = (
+            event.get("requestContext", {})
+            .get("authorizer", {})
+            .get("jwt", {})
+            .get("claims")
+        )
+        if not isinstance(claims, dict) or not claims.get("sub"):
             raise DomainError(
-                "UNAUTHENTICATED",
-                "A configured Cognito API Gateway authorizer is required.",
-                401,
+                "UNAUTHENTICATED", "A verified Clerk session is required.", 401
             )
-        sub = claims["sub"]
-        # Shared demo membership is provisioned only through an administrative
-        # command. The API has no client-writable membership endpoint or header.
-        workspace_id = sub
-        with backend().store.atomic("auth") as tx:
-            membership = tx.get("membership", sub)
-        if membership:
-            if membership.get("disabled") or membership.get("scope") != "demo":
-                raise DomainError(
-                    "WORKSPACE_MEMBERSHIP_DISABLED",
-                    "This demo workspace membership is disabled.",
-                    403,
-                )
-            target = membership.get("target_workspace_id")
-            if (
-                not isinstance(target, str)
-                or not target
-                or target == "auth"
-                or "#" in target
-            ):
-                raise DomainError(
-                    "WORKSPACE_CONFIGURATION_INVALID",
-                    "The provisioned workspace membership is invalid.",
-                    503,
-                )
-            workspace_id = target
-        return {
-            "user": {
-                "id": sub,
-                "name": claims.get("name", "Resident"),
-                "resident": "cognito",
-            },
-            "workspace_id": workspace_id,
-            "mode": "aws",
-        }
+        return backend().clerk_principal(claims)
 
     def demo_guard():
         if not settings.local_controls:
@@ -338,17 +330,26 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
         )
         return value
 
-    @app.get("/api/session")
+    @app.get(
+        "/api/session", response_model=SessionResponse, response_model_exclude_none=True
+    )
     def session(p=Depends(principal)):
-        return p
+        result = {key: p[key] for key in ("user", "workspace_id", "mode")}
+        if settings.mode == "aws":
+            result.update(
+                generation=p["generation"], quotas=backend().quota_snapshot(p)
+            )
+        return result
 
     @app.post("/api/observations", response_model=Observation, status_code=201)
-    def observations(data: ObservationInput, p=Depends(principal)):
-        return backend().create_observation(p, data.model_dump(mode="json"))
+    def observations(data: ObservationInput, request: Request, p=Depends(principal)):
+        return backend().create_observation(
+            p, data.model_dump(mode="json"), request.headers.get("idempotency-key")
+        )
 
     @app.get("/api/observations/{observation_id}", response_model=Observation)
     def observation(observation_id: str, p=Depends(principal)):
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             item = backend().require(tx, "observation", observation_id)
             backend().owner(item, p)
             return item
@@ -386,7 +387,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
 
     @app.get("/api/operations/{operation_id}")
     def operation(operation_id: str, p=Depends(principal)):
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             item = backend().require(tx, "operation", operation_id)
             backend().owner(item, p)
             return {
@@ -395,7 +396,9 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
             }
 
     @app.post("/api/uploads", status_code=201)
-    async def upload(file: UploadFile = File(...), p=Depends(principal)):
+    async def upload(
+        request: Request, file: UploadFile = File(...), p=Depends(principal)
+    ):
         maximum = (4 if settings.mode == "aws" else 8) * 1024 * 1024
         content = await file.read(maximum + 1)
         await file.close()
@@ -475,25 +478,21 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
                     "NF_EVIDENCE_BUCKET must be configured; no local fallback.",
                     503,
                 )
-            import boto3
-
-            key = p["workspace_id"] + "/" + evidence_id + ".jpg"
-            boto3.client("s3", region_name=settings.region).put_object(
-                Bucket=settings.evidence_bucket,
-                Key=key,
-                Body=safe,
-                ContentType="image/jpeg",
-                ServerSideEncryption="AES256",
+            item = backend().persist_cloud_upload(
+                p,
+                request.headers.get("idempotency-key"),
+                hashlib.sha256(content).hexdigest(),
+                item,
+                safe,
             )
-            item["object_key"] = key
-            item["s3_key"] = key
-        with backend().store.atomic(p["workspace_id"]) as tx:
+            return backend().evidence_projection(item)
+        with backend().authorized(p) as tx:
             tx.put("evidence", evidence_id, item)
         return backend().evidence_projection(item)
 
     @app.get("/api/evidence/{evidence_id}")
     def evidence(evidence_id: str, public: bool = False, p=Depends(principal)):
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             item = backend().evidence(tx, evidence_id, p, allow_public=public)
         if public and not item["public_approved"]:
             raise DomainError(
@@ -561,7 +560,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
 
     @app.get("/api/incidents/{incident_id}/events")
     def events(incident_id: str, cursor: str | None = None, p=Depends(principal)):
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             inc = backend().require(tx, "incident", incident_id)
             backend().accessible(tx, inc, p)
             source = tx.list("event:" + incident_id, limit=101, after=cursor)
@@ -576,7 +575,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
 
     @app.post("/api/incidents/{incident_id}/subscription")
     def subscription(incident_id: str, data: SubscriptionInput, p=Depends(principal)):
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             inc = backend().require(tx, "incident", incident_id)
             backend().accessible(tx, inc, p)
             backend().subscribe(tx, incident_id, p["user"]["id"], data.following)
@@ -624,7 +623,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
 
     @app.get("/api/notifications")
     def notifications(cursor: str | None = None, p=Depends(principal)):
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             items = [
                 {k: v for k, v in n.items() if k not in ("workspace_id", "user_id")}
                 for n in tx.list(
@@ -639,7 +638,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
 
     @app.post("/api/notifications/{notification_id}/read")
     def read_notification(notification_id: str, p=Depends(principal)):
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             item = backend().require(tx, "notification", notification_id)
             if item["user_id"] != p["user"]["id"]:
                 raise DomainError("NOT_FOUND", "Notification not found.", 404)
@@ -687,7 +686,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
     @app.post("/api/demo/clock")
     def clock(data: ClockInput, p=Depends(principal)):
         demo_guard()
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             ws = backend().require(tx, "workspace", p["workspace_id"])
             ws["clock_offset"] += data.advance_seconds
             tx.put("workspace", ws["id"], ws)
@@ -699,7 +698,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
     @app.post("/api/demo/scenario")
     def scenario(data: ScenarioInput, p=Depends(principal)):
         demo_guard()
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             ws = backend().require(tx, "workspace", p["workspace_id"])
             ws["lost_receipt"] = data.lost_receipt
             tx.put("workspace", ws["id"], ws)
@@ -710,7 +709,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
         incident_id: str, data: TicketStatusInput, p=Depends(principal)
     ):
         demo_guard()
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             inc = backend().require(tx, "incident", incident_id)
             backend().accessible(tx, inc, p)
             if not inc.get("ticket_id"):
@@ -725,14 +724,14 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
         status = await set_ticket_status(
             ticket["receipt_id"], data.status, data.closure_note
         )
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             backend().record_status(tx, incident_id, status)
         return {"agency_status": status.get("normalized_status", data.status)}
 
     @app.post("/api/demo/reset")
     def reset(p=Depends(principal)):
         demo_guard()
-        with backend().store.atomic(p["workspace_id"]) as tx:
+        with backend().authorized(p) as tx:
             for kind in tx.kinds():
                 if kind in ("workspace", "user"):
                     continue
@@ -789,7 +788,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
 
 app = create_app()
 
-# Mangum supplies the trusted API Gateway event in request.scope for Cognito authorization.
+# Mangum supplies the trusted API Gateway event for Clerk JWT authorization.
 try:
     from mangum import Mangum
 

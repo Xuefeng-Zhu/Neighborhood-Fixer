@@ -9,6 +9,7 @@ from scripts.verify_aws_journey import (
     Journey,
     JourneyError,
     approved_hash,
+    current_session_token,
     load_config,
     main,
 )
@@ -95,6 +96,10 @@ def clients_and_operator(*, lost_approval_response=False):
             else "b"
         )
         path = request.url.path
+        if request.method == "POST" and path in ("/api/uploads", "/api/observations"):
+            import uuid
+
+            assert uuid.UUID(request.headers["Idempotency-Key"])
         if path == "/api/health":
             return httpx.Response(
                 200,
@@ -373,7 +378,7 @@ def test_existing_report_cannot_be_automatically_replayed(tmp_path):
     assert state["approvals"] == 0
 
 
-def test_private_cognito_session_files_are_scope_and_expiry_checked(tmp_path):
+def test_private_clerk_session_files_are_scope_and_expiry_checked(tmp_path):
     config = configuration()
     config.pop("token_a")
     config.pop("token_b")
@@ -395,6 +400,20 @@ def test_private_cognito_session_files_are_scope_and_expiry_checked(tmp_path):
     path.chmod(0o600)
     loaded = load_config(path)
     assert loaded["token_a"] == "private-a" and loaded["token_b"] == "private-b"
+    refreshed = json.loads((tmp_path / "a.json").read_text())
+    refreshed["access_token"] = "renewed-private-a"
+    (tmp_path / "a.json").write_text(json.dumps(refreshed))
+    assert current_session_token(loaded, "a") == "renewed-private-a"
+    for field, value in [
+        ("user_id", "different-resident"),
+        ("api_origin", "https://untrusted.invalid"),
+        ("expires_at", "2000-01-01T00:00:00Z"),
+    ]:
+        (tmp_path / "a.json").write_text(json.dumps({**refreshed, field: value}))
+        with pytest.raises(JourneyError) as error:
+            current_session_token(loaded, "a")
+        assert error.value.code == "SESSION_FILE_INVALID"
+    (tmp_path / "a.json").write_text(json.dumps(refreshed))
     session = json.loads((tmp_path / "b.json").read_text())
     session["workspace_id"] = "unauthorized-workspace"
     (tmp_path / "b.json").write_text(json.dumps(session))

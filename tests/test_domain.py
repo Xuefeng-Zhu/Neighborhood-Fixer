@@ -29,6 +29,21 @@ def system(tmp_path, monkeypatch):
     client.close()
 
 
+def switch_fixture_to_cloud(domain, p):
+    domain.settings.mode = "aws"
+    domain.settings.shared_workspace_id = p["workspace_id"]
+    p.update(
+        mode="aws", generation=domain.settings.data_generation, subject="user_test"
+    )
+    with domain.store.atomic(p["workspace_id"]) as tx:
+        control = tx.get("workspace", p["workspace_id"])
+        control.update(generation=domain.settings.data_generation, admission="public")
+        tx.put("workspace", p["workspace_id"], control)
+        for job in tx.list("job"):
+            job.update(principal=p, generation=p["generation"])
+            tx.put("job", job["id"], job)
+
+
 def observation(
     description="The curb ramp has broken pavement along the crossing.", **kwargs
 ):
@@ -177,6 +192,77 @@ def test_full_journey_second_neighbor_restart_closure_verification(
         }
 
 
+def test_decisions_dedupe_by_resident_revision_and_outcome(system):
+    domain, client, alex = system
+    case, _ = make_case(domain, alex)
+    sam = client.post(
+        "/api/demo/session",
+        json={"resident": "sam", "workspace_id": alex["workspace_id"]},
+    ).json()
+
+    pending, _ = analyze(
+        domain, sam, description="I also found broken pavement at this curb ramp."
+    )
+    with domain.store.atomic(sam["workspace_id"]) as tx:
+        jobs_before = len(tx.list("job", limit=500))
+    link_operations = [
+        domain.decide(sam, pending["id"], case["id"], False) for _ in range(5)
+    ]
+    different_outcome = domain.decide(sam, pending["id"], None, True)
+    assert len(set(link_operations)) == 1
+    assert different_outcome != link_operations[0]
+    with domain.store.atomic(sam["workspace_id"]) as tx:
+        assert len(tx.list("job", limit=500)) == jobs_before + 2
+
+    domain.patch_observation(
+        sam,
+        pending["id"],
+        {"description": "I found newly widened damage at this same curb ramp."},
+    )
+    run(domain, sam, domain.start_analysis(sam, pending["id"]))
+    revised_operation = domain.decide(sam, pending["id"], case["id"], False)
+    assert revised_operation not in {link_operations[0], different_outcome}
+    with domain.store.atomic(sam["workspace_id"]) as tx:
+        failed = tx.get("operation", revised_operation)
+        failed["status"] = "failed"
+        tx.put("operation", revised_operation, failed)
+    assert domain.decide(sam, pending["id"], case["id"], False) != revised_operation
+
+    distinct, _ = analyze(
+        domain, alex, description="A newly reported distinct crack at another corner."
+    )
+    distinct_operation = domain.decide(alex, distinct["id"], None, True)
+    assert domain.decide(alex, distinct["id"], None, True) == distinct_operation
+    run(domain, alex, distinct_operation)
+    assert domain.decide(alex, distinct["id"], None, True) == distinct_operation
+
+    linked, _ = analyze(
+        domain, sam, description="A separate neighbor report at this curb ramp."
+    )
+    switch_fixture_to_cloud(domain, sam)
+    with domain.store.atomic(sam["workspace_id"]) as tx:
+        _, quota = domain.quota_record(tx, sam)
+        reasoning_before = quota["reasoning"]
+    original_operation = domain.decide(sam, linked["id"], case["id"], False)
+    with domain.store.atomic(sam["workspace_id"]) as tx:
+        _, quota = domain.quota_record(tx, sam)
+        assert quota["reasoning"] == reasoning_before + 1
+    run(domain, sam, original_operation)
+    with domain.store.atomic(sam["workspace_id"]) as tx:
+        linked_jobs = len(tx.list("job", limit=500))
+    assert domain.decide(sam, linked["id"], case["id"], False) == original_operation
+    with domain.store.atomic(sam["workspace_id"]) as tx:
+        assert len(tx.list("job", limit=500)) == linked_jobs
+        assert not [
+            job for job in tx.list("job", limit=500) if job["kind"] == "already_linked"
+        ]
+        _, quota = domain.quota_record(tx, sam)
+        assert quota["reasoning"] == reasoning_before + 1
+    with pytest.raises(DomainError) as changed_outcome:
+        domain.decide(sam, linked["id"], None, True)
+    assert changed_outcome.value.code == "OBSERVATION_LINKED"
+
+
 def test_missing_information_is_clarification_not_invention(system):
     domain, _, p = system
     obs, result = analyze(domain, p, location_confirmed=False, asset_public="unknown")
@@ -200,17 +286,30 @@ def test_nearby_distinct_and_reversible_link_never_starts_submission(system):
         domain, p, description="Another separate curb ramp on the opposite corner."
     )
     assert distinct["id"] != first["id"]
-    sam = client.post("/api/demo/session", json={"resident": "sam"}).json()
+    sam = client.post(
+        "/api/demo/session",
+        json={"resident": "sam", "workspace_id": p["workspace_id"]},
+    ).json()
     obs, _ = analyze(domain, sam)
-    run(domain, sam, domain.decide(sam, obs["id"], first["id"], False))
+    original_link = domain.decide(sam, obs["id"], first["id"], False)
+    run(domain, sam, original_link)
     domain.unlink_observation(sam, obs["id"])
     assert domain.incident_detail(p, first["id"])["observation_count"] == 1
     with domain.store.atomic(p["workspace_id"]) as tx:
-        assert tx.get("observation", obs["id"])["incident_id"] is None
+        current = tx.get("observation", obs["id"])
+        assert (
+            current["incident_id"] is None and current["version"] == obs["version"] + 1
+        )
         assert len(tx.list("attempt")) == 0
         assert any(
             e["type"] == "OBSERVATION_UNLINKED" for e in tx.list("event:" + first["id"])
         )
+    relink = domain.decide(sam, obs["id"], first["id"], False)
+    assert relink != original_link
+    run(domain, sam, relink)
+    assert domain.incident_detail(p, first["id"])["observation_count"] == 2
+    with domain.store.atomic(p["workspace_id"]) as tx:
+        assert len(tx.list("attempt")) == 0
 
 
 def test_parallel_approval_reserves_one_frozen_external_action(system, browser_double):
@@ -401,6 +500,96 @@ def test_evidence_sanitized_scoped_and_public_projection(system):
         "Private author" not in public
         and "contact" not in public
         and str(domain.settings.data_dir) not in public
+    )
+
+
+def test_nonowners_receive_only_approximate_location_and_public_safe_agent_data(system):
+    domain, client, alex = system
+    latitude, longitude = 47.615432, -122.335432
+    case, _ = make_case(domain, alex, latitude=latitude, longitude=longitude)
+    private_marker = "PRIVATE PHOTO DETAIL"
+    private_tools = {
+        "private_visual_read",
+        "private_route_trace",
+        "private_coordinator_trace",
+    }
+    with domain.store.atomic(alex["workspace_id"]) as tx:
+        record = tx.get("incident", case["id"])
+        record["analysis"]["observed_facts"] = [private_marker]
+        record["analysis"]["agent_activity"] = [{"tool": "private_visual_read"}]
+        record["routing"]["agent_activity"] = [{"tool": "private_route_trace"}]
+        record["coordinator"] = record.get("coordinator") or {}
+        record["coordinator"]["agent_activity"] = [
+            {"tool": "private_coordinator_trace"}
+        ]
+        tx.put("incident", case["id"], record)
+
+    sam = client.post(
+        "/api/demo/session",
+        json={"resident": "sam", "workspace_id": alex["workspace_id"]},
+    ).json()
+    public_detail = domain.incident_detail(sam, case["id"])
+    public_list = next(
+        item for item in domain.list_incidents(sam)["items"] if item["id"] == case["id"]
+    )
+    assert public_detail["analysis"] is None
+    assert "agent_activity" not in public_detail["routing"]
+    assert private_marker not in json.dumps(public_detail)
+    assert private_tools.isdisjoint(
+        activity.get("tool") for activity in public_detail["agent_activity"]
+    )
+    assert public_detail["events"] and public_detail["routing"]["recipient"]
+    assert (public_detail["latitude"], public_detail["longitude"]) == (
+        round(latitude, 3),
+        round(longitude, 3),
+    )
+    assert (public_list["latitude"], public_list["longitude"]) == (
+        round(latitude, 3),
+        round(longitude, 3),
+    )
+
+    neighbor, _ = analyze(
+        domain,
+        sam,
+        description="I also found broken pavement at this exact curb ramp.",
+        latitude=latitude,
+        longitude=longitude,
+    )
+    run(domain, sam, domain.decide(sam, neighbor["id"], case["id"], False))
+    member_detail = domain.incident_detail(sam, case["id"])
+    member_list = next(
+        item
+        for item in domain.list_incidents(sam, mine=True)["items"]
+        if item["id"] == case["id"]
+    )
+    assert member_detail["analysis"] is None
+    assert private_marker not in json.dumps(member_detail)
+    assert (member_detail["latitude"], member_detail["longitude"]) == (
+        round(latitude, 3),
+        round(longitude, 3),
+    )
+    assert (member_list["latitude"], member_list["longitude"]) == (
+        round(latitude, 3),
+        round(longitude, 3),
+    )
+
+    owner_detail = domain.incident_detail(alex, case["id"])
+    owner_list = next(
+        item
+        for item in domain.list_incidents(alex, mine=True)["items"]
+        if item["id"] == case["id"]
+    )
+    assert owner_detail["analysis"]["observed_facts"] == [private_marker]
+    assert private_tools.issubset(
+        activity.get("tool") for activity in owner_detail["agent_activity"]
+    )
+    assert (owner_detail["latitude"], owner_detail["longitude"]) == (
+        latitude,
+        longitude,
+    )
+    assert (owner_list["latitude"], owner_list["longitude"]) == (
+        latitude,
+        longitude,
     )
 
 
@@ -636,70 +825,27 @@ def test_integrity_failure_before_browser_write_releases_for_fresh_review(
     assert not browser_double["submissions"]
 
 
-def test_cloud_membership_is_server_provisioned_and_subject_scoped(tmp_path):
+def test_legacy_cognito_claims_are_no_longer_accepted(tmp_path):
     from services.api.store import SQLiteStore
 
-    settings = Settings(mode="aws", environment="demo", data_dir=tmp_path)
+    settings = Settings(
+        mode="aws",
+        environment="demo",
+        data_dir=tmp_path,
+        clerk_issuer="https://nf.clerk.accounts.dev",
+        authorized_parties=("https://app.example",),
+    )
     domain = Domain(settings, store=SQLiteStore(tmp_path / "auth-test.sqlite3"))
     app = create_app(settings, domain)
 
-    class TrustedGatewayEvent:
-        def __init__(self, subject):
-            self.subject = subject
-
+    class LegacyGateway:
         async def __call__(self, scope, receive, send):
             scope["aws.event"] = {
-                "requestContext": {
-                    "authorizer": {
-                        "jwt": {
-                            "claims": {
-                                "sub": self.subject,
-                                "name": "Authorized resident",
-                            }
-                        }
-                    }
-                }
+                "requestContext": {"authorizer": {"claims": {"sub": "cognito-subject"}}}
             }
             await app(scope, receive, send)
 
-    alice = TestClient(TrustedGatewayEvent("cognito-alice"))
-    bob = TestClient(TrustedGatewayEvent("cognito-bob"))
-    assert (
-        alice.get("/api/session", headers={"x-workspace-id": "victim"}).json()[
-            "workspace_id"
-        ]
-        == "cognito-alice"
-    )
-    with domain.store.atomic("auth") as tx:
-        tx.put(
-            "membership",
-            "cognito-alice",
-            {
-                "target_workspace_id": "approved-shared-demo",
-                "scope": "demo",
-                "disabled": False,
-            },
-        )
-        tx.put(
-            "membership",
-            "cognito-bob",
-            {
-                "target_workspace_id": "approved-shared-demo",
-                "scope": "demo",
-                "disabled": False,
-            },
-        )
-    assert (
-        alice.get("/api/session").json()["workspace_id"]
-        == bob.get("/api/session").json()["workspace_id"]
-        == "approved-shared-demo"
-    )
-    with domain.store.atomic("auth") as tx:
-        m = tx.get("membership", "cognito-bob")
-        m["disabled"] = True
-        tx.put("membership", "cognito-bob", m)
-    assert bob.get("/api/session").status_code == 403
-    assert alice.get("/api/session").status_code == 200
+    assert TestClient(LegacyGateway()).get("/api/session").status_code == 401
 
 
 def test_reset_isolated_workspace_clears_indexes_and_preserves_other_workspace(system):
@@ -781,7 +927,7 @@ def test_aws_report_aggregate_limit_requires_fresh_smaller_draft(system):
         e = tx.get("evidence", eid)
         e["size"] = 4 * 1024 * 1024 + 1
         tx.put("evidence", eid, e)
-    domain.settings.mode = "aws"
+    switch_fixture_to_cloud(domain, p)
     with pytest.raises(DomainError) as approval:
         approve(domain, p, case)
     assert approval.value.code == "ATTACHMENTS_TOO_LARGE"
@@ -827,7 +973,7 @@ def test_optional_receipt_storage_failure_preserves_confirmed_ticket(
 
     monkeypatch.setattr(browser, "submit_report", submit)
     if provider == "aws":
-        domain.settings.mode = "aws"
+        switch_fixture_to_cloud(domain, p)
 
         class FailingS3:
             def put_object(self, **kwargs):

@@ -70,6 +70,7 @@ def wake_approval(workspace_id, incident_id, draft_id, domain=None):
 
     domain = domain or Domain()
     with domain.store.atomic(workspace_id) as tx:
+        domain.check_admission(tx)
         record = tx.get("callback", draft_id)
         decision = _decision(tx, incident_id, draft_id)
         if not record or record.get("consumed") or decision == "pending":
@@ -92,6 +93,7 @@ def wake_approval(workspace_id, incident_id, draft_id, domain=None):
         if code not in ("TaskDoesNotExist", "TaskTimedOut", "InvalidToken"):
             raise
     with domain.store.atomic(workspace_id) as tx:
+        domain.check_admission(tx)
         current = tx.get("callback", draft_id)
         if current and current.get("task_token") == token:
             # Retain audit correlation, erase the sensitive token after consumption.
@@ -110,6 +112,7 @@ def handler(event, context):
     if phase == "register_approval":
         incident_id, draft_id = event["incident_id"], event["draft_id"]
         with domain.store.atomic(workspace_id) as tx:
+            domain.check_admission(tx)
             decision = _decision(tx, incident_id, draft_id)
             if decision == "invalid":
                 raise PermissionError("Unknown callback revision")
@@ -129,6 +132,7 @@ def handler(event, context):
                     "draft_id": draft_id,
                     "task_token": event["task_token"],
                     "consumed": False,
+                    "generation": domain.settings.data_generation,
                     "expires_at": int(time.time()) + 3600,
                 },
             )
@@ -140,6 +144,7 @@ def handler(event, context):
     operation_id = event["operation_id"]
     asyncio.run(domain.run_job(workspace_id, operation_id))
     with domain.store.atomic(workspace_id) as tx:
+        domain.check_admission(tx)
         operation = tx.get("operation", operation_id)
         job = tx.get("job", operation_id)
         if not operation or not job:

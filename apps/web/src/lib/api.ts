@@ -1,4 +1,4 @@
-import { apiUrl, getAccessToken } from './auth';
+import { apiUrl } from './auth';
 import type { components } from './generated-api';
 export type Category = components['schemas']['Category'];
 export type ObservationRequest = components['schemas']['ObservationInput'];
@@ -16,16 +16,8 @@ export const categoryLabels: Record<Category, string> = {
   pothole: 'Pothole',
   walkway_obstruction: 'Object obstructing a walkway',
 };
-export interface User {
-  id: string;
-  name: string;
-  resident: string;
-}
-export interface Session {
-  user: User;
-  workspace_id: string;
-  mode: string;
-}
+export type User = components['schemas']['User'];
+export type Session = components['schemas']['SessionResponse'];
 export interface Health {
   mode: string;
   integrations: Record<
@@ -141,6 +133,7 @@ export interface Incident {
   routing?: Routing;
   agent_activity?: Activity[];
   is_owner?: boolean;
+  is_sample?: boolean;
 }
 export interface Operation {
   id: string;
@@ -163,6 +156,12 @@ export class ApiError extends Error {
   correlationId?: string;
   retryable: boolean;
   status: number;
+  details?: {
+    resource?: string;
+    limit?: number;
+    remaining?: number;
+    reset_at?: string;
+  };
   constructor(
     status: number,
     error: {
@@ -170,54 +169,122 @@ export class ApiError extends Error {
       message?: string;
       correlation_id?: string;
       retryable?: boolean;
+      details?: ApiError['details'];
     },
   ) {
     super(error.message || `Request failed (${status})`);
     this.status = status;
+    this.details = error.details;
     this.code = error.code || 'REQUEST_FAILED';
     this.correlationId = error.correlation_id;
     this.retryable = Boolean(error.retryable);
   }
 }
-export async function request<T>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
-  const token = getAccessToken();
-  const response = await fetch(apiUrl(path), {
-    credentials: 'include',
-    ...init,
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init.body instanceof FormData
-        ? {}
-        : { 'Content-Type': 'application/json' }),
-      ...init.headers,
-    },
-  });
-  if (!response.ok) {
-    let body;
-    try {
-      body = await response.json();
-    } catch {
-      body = {};
+export type TokenGetter = () => Promise<string | null>;
+/** One transport per authenticated identity. No bearer is cached by the app. */
+export function createApiClient(
+  options: {
+    getToken?: TokenGetter;
+    credentials?: RequestCredentials;
+    onWrite?: () => void;
+  } = {},
+) {
+  let lifetime = new AbortController();
+  const uploadKeys = new Map<string, string>();
+  async function response(path: string, init: RequestInit = {}) {
+    if (!path.startsWith('/') || path.startsWith('//'))
+      throw new Error('API requests must use a relative API path.');
+    const signal = init.signal
+      ? AbortSignal.any([lifetime.signal, init.signal])
+      : lifetime.signal;
+    signal.throwIfAborted();
+    const token = options.getToken ? await options.getToken() : null;
+    signal.throwIfAborted();
+    if (options.getToken && !token)
+      throw new ApiError(401, {
+        code: 'SIGN_IN_REQUIRED',
+        message: 'Your session has ended. Sign in again to continue.',
+      });
+    const headers = new Headers(init.headers);
+    if (init.body && !(init.body instanceof FormData))
+      headers.set('Content-Type', 'application/json');
+    // Callers cannot override the current authenticated principal.
+    headers.delete('Authorization');
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    const result = await fetch(apiUrl(path), {
+      ...init,
+      credentials: options.getToken ? 'omit' : options.credentials || 'include',
+      headers,
+      signal,
+    });
+    signal.throwIfAborted();
+    if (!result.ok) {
+      let body;
+      try {
+        body = await result.json();
+      } catch {
+        body = {};
+      }
+      throw new ApiError(
+        result.status,
+        body.error || {
+          message: typeof body.detail === 'string' ? body.detail : undefined,
+        },
+      );
     }
-    throw new ApiError(
-      response.status,
-      body.error || {
-        message: typeof body.detail === 'string' ? body.detail : undefined,
-      },
-    );
+    return result;
   }
-  return response.status === 204 ? (undefined as T) : response.json();
+  async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const result = await response(path, init);
+    const value =
+      result.status === 204 ? (undefined as T) : await result.json();
+    lifetime.signal.throwIfAborted();
+    if (init.method && !['GET', 'HEAD'].includes(init.method.toUpperCase()))
+      options.onWrite?.();
+    return value;
+  }
+  const post = <T>(path: string, body: unknown = {}, init: RequestInit = {}) =>
+    request<T>(path, { ...init, method: 'POST', body: JSON.stringify(body) });
+  async function upload(file: File, idempotencyKey?: string) {
+    if (!idempotencyKey) {
+      const digest = await crypto.subtle.digest(
+        'SHA-256',
+        await file.arrayBuffer(),
+      );
+      const fingerprint = Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, '0'),
+      ).join('');
+      idempotencyKey = uploadKeys.get(fingerprint) || crypto.randomUUID();
+      uploadKeys.set(fingerprint, idempotencyKey);
+    }
+    const data = new FormData();
+    data.append('file', file);
+    return request<Evidence>('/uploads', {
+      method: 'POST',
+      body: data,
+      headers: { 'Idempotency-Key': idempotencyKey },
+    });
+  }
+  return {
+    request,
+    post,
+    upload,
+    async evidence(path: string, signal?: AbortSignal) {
+      return (await response(path, { signal })).blob();
+    },
+    dispose() {
+      lifetime.abort();
+      uploadKeys.clear();
+    },
+    activate() {
+      if (lifetime.signal.aborted) lifetime = new AbortController();
+    },
+  };
 }
-export const post = <T>(path: string, body: unknown = {}) =>
-  request<T>(path, { method: 'POST', body: JSON.stringify(body) });
-export async function upload(file: File) {
-  const data = new FormData();
-  data.append('file', file);
-  return request<Evidence>('/uploads', { method: 'POST', body: data });
-}
+export type ApiClient = ReturnType<typeof createApiClient>;
+/** Only public health and the credential-free local session use this client. */
+export const localApi = createApiClient();
+export const publicApi = createApiClient({ credentials: 'omit' });
 export const dateTime = (value?: string) =>
   value
     ? new Date(value).toLocaleString(undefined, {

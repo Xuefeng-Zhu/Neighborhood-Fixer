@@ -7,7 +7,7 @@ The implementation follows `docs/design/neighborhood-concept.png` (1536 × 1024)
 - Vitest tests exact report authorization, independent community publication consent, clearing checked authorization when the material revision changes, structured error preservation and durable operation terminal detection.
 - Playwright tests use new signed local sessions/isolated workspaces. They run the actual frontend, API, persisted worker and fictional portal; no network handlers are stubbed in these tests.
 - Browser first visual inspection used Codex IAB. Playwright is additionally used because the user explicitly requires reproducible end-to-end tests and screenshot artifacts.
-- AWS Cognito uses the official authorization-code flow with S256 PKCE, per-tab transaction state, ten-minute transaction expiry, exact configured callback, and expiring access tokens. No client secret or token query parameter. Cloud execution remains unverified without configured deployed resources.
+- AWS sign-in uses @clerk/react and its ordinary session token from useAuth().getToken(). Tokens are requested for each API call, sent as Bearer with credentials omitted, and are not copied to application browser storage. Exact issuer/audience/scope/session/origin checks remain server-side. Local cookie authentication is separate. Clerk live signup, renewal and logout need fresh hosted verification.
 - API request schemas and draft types derive from generated OpenAPI; run `npm run generate:api` after exporting `packages/contracts/openapi.json`.
 
 ## Fidelity ledger
@@ -31,8 +31,8 @@ Above-fold copy intentionally includes only required product copy, actual persis
 ## Provider references
 
 - Amazon Location resource map API key descriptor: https://docs.aws.amazon.com/location/previous/developerguide/using-apikeys.html
-- Cognito authorization endpoint (S256 PKCE): https://docs.aws.amazon.com/cognito/latest/developerguide/authorization-endpoint.html
-- Cognito token exchange endpoint: https://docs.aws.amazon.com/cognito/latest/developerguide/token-endpoint.html
+- Clerk ordinary session tokens: https://clerk.com/docs/guides/sessions/customize-session-tokens
+- HTTP API JWT authorizers: https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html
 - Current package release metadata was checked from the official npm registry; exact versions are pinned in package manifests and lockfile. jsdom26.1.0 is intentionally retained because its Node>=18 engine supports the installed Node24.14.1, while the latest jsdom requires a newer Node24 minor.
 
 ## Final recorded result

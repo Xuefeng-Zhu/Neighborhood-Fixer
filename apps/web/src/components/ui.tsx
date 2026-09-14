@@ -22,6 +22,12 @@ export function ErrorMessage({ error }: { error: unknown }) {
       <AlertCircle size={18} />
       <div>
         {e.message || 'Something went wrong. Please try again.'}
+        {e instanceof ApiError && e.status === 429 && e.details?.reset_at && (
+          <small>
+            Daily limit: {e.details.limit}. Resets{' '}
+            {new Date(e.details.reset_at).toLocaleString()}.
+          </small>
+        )}
         {e instanceof ApiError && e.correlationId && (
           <small>Reference: {e.correlationId}</small>
         )}

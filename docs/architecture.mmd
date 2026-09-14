@@ -27,7 +27,8 @@ flowchart TB
       Playwright[Local Chromium]
     end
     subgraph AWS[AWS demo configuration - deployment separately verified]
-      Cognito[Cognito JWT authorization]
+      Clerk[Clerk JWT issuer + audience + resident scope]
+      Admission[Server-owned Demo Borough + generation + daily quotas]
       Lambda[API Gateway + Lambda]
       Runtime[AgentCore Runtime + Strands + Bedrock]
       Durable[Step Functions Standard + server-side callbacks]
@@ -44,7 +45,8 @@ flowchart TB
     API --> Files
     Analyst --> Fixtures
     Browser --> Playwright
-    Lambda --> Cognito
+    Lambda --> Clerk
+    Lambda --> Admission
     Lambda --> Dynamo
     Lambda --> S3
     Lambda --> Durable

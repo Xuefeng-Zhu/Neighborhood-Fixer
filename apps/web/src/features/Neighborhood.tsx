@@ -2,7 +2,8 @@ import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { Plus, SlidersHorizontal } from 'lucide-react';
-import { request, categories } from '../lib/api';
+import { categories } from '../lib/api';
+import { useApi } from '../lib/api-context';
 import type { Incident } from '../lib/api';
 import {
   IncidentRow,
@@ -12,6 +13,7 @@ import {
 } from '../components/ui';
 import { NeighborhoodMap } from '../components/NeighborhoodMap';
 export function Neighborhood({ mine = false }: { mine?: boolean }) {
+  const { request } = useApi();
   const [category, setCategory] = useState('');
   const [status, setStatus] = useState('');
   const [following, setFollowing] = useState(false);

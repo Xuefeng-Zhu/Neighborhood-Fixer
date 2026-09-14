@@ -16,15 +16,9 @@ import {
   MessageSquare,
   ShieldCheck,
 } from 'lucide-react';
-import {
-  categories,
-  dateTime,
-  humanize,
-  post,
-  request,
-  upload,
-} from '../lib/api';
+import { categories, dateTime, humanize } from '../lib/api';
 import type { Draft, Incident } from '../lib/api';
+import { useApi } from '../lib/api-context';
 import {
   ErrorMessage,
   EvidenceImage,
@@ -35,6 +29,7 @@ import {
 import { AnalysisView } from './Report';
 import { useSession } from '../lib/session';
 export function CaseDetail() {
+  const { request, post } = useApi();
   const { id } = useParams();
   const [search] = useSearchParams();
   const client = useQueryClient();
@@ -86,14 +81,17 @@ export function CaseDetail() {
     incident.thumbnail_url ||
     incident.observations?.flatMap((o) => o.evidence || [])[0]?.url;
   const canApprove =
+    !incident.is_sample &&
     incident.is_owner &&
     incident.draft &&
     ['AWAITING_APPROVAL', 'PREPARED', 'FAILED_BEFORE_SUBMISSION'].includes(
       incident.submission_status,
     );
-  const canVerify = ['CLOSED', 'OPEN', 'IN_PROGRESS', 'RECEIVED'].includes(
-    incident.agency_status,
-  );
+  const canVerify =
+    !incident.is_sample &&
+    ['CLOSED', 'OPEN', 'IN_PROGRESS', 'RECEIVED'].includes(
+      incident.agency_status,
+    );
   return (
     <main className="page detail-page">
       <Link className="back-link" to="/">
@@ -111,18 +109,26 @@ export function CaseDetail() {
             {incident.location_label}
           </p>
         </div>
-        <button
-          className="button secondary"
-          disabled={busy}
-          aria-pressed={incident.following}
-          onClick={() =>
-            void mutate('subscription', { following: !incident.following })
-          }
-        >
-          {incident.following ? <BellOff size={17} /> : <Bell size={17} />}{' '}
-          {incident.following ? 'Following case' : 'Follow this case'}
-        </button>
+        {!incident.is_sample && (
+          <button
+            className="button secondary"
+            disabled={busy}
+            aria-pressed={incident.following}
+            onClick={() =>
+              void mutate('subscription', { following: !incident.following })
+            }
+          >
+            {incident.following ? <BellOff size={17} /> : <Bell size={17} />}{' '}
+            {incident.following ? 'Following case' : 'Follow this case'}
+          </button>
+        )}
       </div>
+      {incident.is_sample && (
+        <div className="notice">
+          Illustrative sample case · read only. Report your own observation to
+          start a real case.
+        </div>
+      )}
       <ErrorMessage error={error || query.error} />
       {message && (
         <div className="notice success" role="status">
@@ -325,7 +331,8 @@ export function CaseDetail() {
             {incident.submission_status === 'IN_FLIGHT' && (
               <Loading>The browser is working on the approved report…</Loading>
             )}
-            {incident.submission_status === 'OUTCOME_UNKNOWN' &&
+            {!incident.is_sample &&
+              incident.submission_status === 'OUTCOME_UNKNOWN' &&
               incident.is_owner && (
                 <button
                   className="button primary"
@@ -358,7 +365,8 @@ export function CaseDetail() {
                 }}
               />
             )}
-            {incident.is_owner &&
+            {!incident.is_sample &&
+              incident.is_owner &&
               ['AWAITING_APPROVAL', 'PREPARED', 'IN_FLIGHT'].includes(
                 incident.submission_status,
               ) && (
@@ -377,7 +385,8 @@ export function CaseDetail() {
                   progress as a follower.
                 </p>
               )}
-            {incident.is_owner &&
+            {!incident.is_sample &&
+              incident.is_owner &&
               !incident.draft &&
               ['PREPARED', 'AWAITING_APPROVAL'].includes(
                 incident.submission_status,
@@ -526,6 +535,7 @@ export function ApprovalPanel({
   draft: Draft;
   onSuccess: () => void;
 }) {
+  const { post } = useApi();
   const [consent, setConsent] = useState(false);
   const [publish, setPublish] = useState(incident.shared_public);
   const [publishPhotos, setPublishPhotos] = useState(
@@ -774,6 +784,7 @@ function VerificationPanel({
   incident: Incident;
   onSuccess: () => void;
 }) {
+  const { post, upload } = useApi();
   const { session } = useSession();
   const maxUploadMB = session.mode.toLowerCase().includes('local') ? 8 : 4;
   const [choice, setChoice] = useState('');

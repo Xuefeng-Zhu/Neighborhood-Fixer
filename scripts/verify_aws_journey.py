@@ -107,6 +107,8 @@ def load_config(path: Path) -> dict:
                 ):
                     raise ValueError("Session scope mismatch")
                 config["token_" + who] = session["access_token"]
+                config["session_" + who + "_file"] = str(session_path.resolve())
+                config["session_" + who + "_user"] = session["user_id"]
                 subjects.append(session["user_id"])
             except Exception:  # noqa: BLE001 - keep credentials and provider payloads out of reports
                 raise JourneyError(
@@ -124,7 +126,7 @@ def load_config(path: Path) -> dict:
     if len(subjects) == 2 and subjects[0] == subjects[1]:
         raise JourneyError(
             "DISTINCT_RESIDENTS_REQUIRED",
-            "The private session files must identify different Cognito residents.",
+            "The private session files must identify different Clerk residents.",
         )
     if config["token_a"] == config["token_b"]:
         raise JourneyError(
@@ -132,6 +134,36 @@ def load_config(path: Path) -> dict:
             "Provide separate current bearer tokens for the two provisioned residents.",
         )
     return config
+
+
+def current_session_token(config, who):
+    """Read an explicitly supplied keeper file afresh for Clerk's short-lived token."""
+    path = config.get("session_" + who + "_file")
+    if not path:
+        return config["token_" + who]
+    try:
+        path = Path(path)
+        if not path.is_file() or stat.S_IMODE(path.stat().st_mode) & 0o077:
+            raise ValueError()
+        session = json.loads(path.read_text())
+        expires = datetime.fromisoformat(session["expires_at"])
+        if (
+            session.get("schema_version") != 1
+            or expires.tzinfo is None
+            or expires <= datetime.now(UTC)
+            or session.get("api_origin") != config["api_base"].rstrip("/")
+            or session.get("workspace_id") != config["expected_workspace_id"]
+            or session.get("user_id") != config["session_" + who + "_user"]
+            or not isinstance(session.get("access_token"), str)
+            or not session["access_token"]
+        ):
+            raise ValueError()
+        return session["access_token"]
+    except Exception:  # noqa: BLE001 - never expose bearer token or private file contents
+        raise JourneyError(
+            "SESSION_FILE_INVALID",
+            "The current resident session is expired or changed identity/scope. Keep both authenticated session helpers running.",
+        ) from None
 
 
 def approved_hash(draft: dict) -> str:
@@ -250,6 +282,12 @@ class Journey:
                 "PATH_REJECTED",
                 "Only the fixed application API paths may receive resident tokens.",
             )
+        kwargs["headers"] = {
+            **kwargs.get("headers", {}),
+            "Authorization": "Bearer " + current_session_token(self.config, who),
+        }
+        if method == "POST" and path in ("/api/uploads", "/api/observations"):
+            kwargs["headers"].setdefault("Idempotency-Key", str(uuid.uuid4()))
         attempts = 3 if method == "GET" else 1
         if method != "GET":
             self.report["write_requests"].append(
@@ -434,7 +472,7 @@ class Journey:
             ):
                 raise JourneyError(
                     "WORKSPACE_MEMBERSHIP_MISMATCH",
-                    "The tokens must identify different Cognito residents in the explicitly provisioned shared workspace.",
+                    "The tokens must identify different Clerk residents in the explicitly provisioned shared workspace.",
                 )
             # Public preflight uses a separate client: no resident token is ever
             # forwarded to the fictional portal or Secrets Manager.
@@ -459,7 +497,8 @@ class Journey:
                 )
             existing = self.request("a", "GET", "/api/incidents")
             if existing.get("next_cursor") or any(
-                c.get("category") == "damaged_sidewalk"
+                not c.get("is_sample")
+                and c.get("category") == "damaged_sidewalk"
                 and abs(c.get("latitude", 0) - 47.615) < 0.001
                 and abs(c.get("longitude", 0) + 122.335) < 0.001
                 for c in existing.get("items", [])
@@ -468,7 +507,7 @@ class Journey:
                     "EXISTING_CASE_REQUIRES_REVIEW",
                     "The workspace already contains a nearby case or more than one page of cases. Review existing work instead of automatically creating another report.",
                 )
-            self.report["checks"]["shared_cognito_workspace"] = True
+            self.report["checks"]["shared_clerk_workspace"] = True
             self.report["checks"]["aws_and_fictional_portal_preflight"] = True
             self.phase("analyze_resident_a")
             before = self.upload("a", "curb-before.png")

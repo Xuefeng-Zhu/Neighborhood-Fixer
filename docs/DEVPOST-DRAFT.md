@@ -14,7 +14,7 @@ A broken curb ramp can interrupt a trip to the bus stop, school, or grocery stor
 
 ## How it is built
 
-A React/TypeScript application uses a shared FastAPI domain layer with explicit observations, incidents, immutable submission revisions, approvals, attempts, tickets, and append-only case events. The local mode uses persisted SQLite jobs and an actual browser-driven fictional portal. Three restricted Strands agents are implemented for issue analysis, routing, and case coordination with Amazon Bedrock as the real provider. The AWS configuration includes AgentCore Runtime and Browser, Step Functions Standard, DynamoDB, private S3, Cognito, Amplify Hosting, and Amazon Location. Consult the current test report for which of those paths have actually been exercised.
+A React/TypeScript application uses a shared FastAPI domain layer with explicit observations, incidents, immutable submission revisions, approvals, attempts, tickets and append-only case events. Local mode uses persisted SQLite jobs and an actual browser-driven fictional portal. Three restricted Strands agents use Amazon Bedrock for real analysis, routing and coordination. The AWS configuration includes AgentCore Runtime and Browser, Step Functions Standard, DynamoDB, private S3, Amplify Hosting and Amazon Location. Clerk provides session-bound sign-in; a server-selected shared Demo Borough uses daily quotas and generation-fenced admission. Consult the current test report for live acceptance; prior identity-provider tests do not establish this migration.
 
 ## What the demonstration establishes
 

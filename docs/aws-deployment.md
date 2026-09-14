@@ -1,18 +1,12 @@
-# AWS demo deployment and teardown
+# AWS deployment and Clerk cutover
 
-**Status as of 2026-09-14 08:07 UTC:** both stacks and the Amplify frontend are deployed in `us-west-2`. The latest backend update reached `UPDATE_COMPLETE` at 08:05:46 UTC; subsequent health checks returned HTTP 200. AWS setup and temporary CLI access are authorized. Live storage privacy and API checks passed. Hosted Cognito PKCE, authenticated API, map, refresh and logout checks passed for both test residents. The owner Cognito account remains in `FORCE_CHANGE_PASSWORD` for an owner-controlled first login.
+The source now targets a Clerk development instance and one server-assigned Demo Borough workspace. This migration has local test evidence; Clerk deployment, signup, token renewal and post-reset acceptance must be verified on the live origin before public admission. Prior AWS results used the previous identity provider: two residents' real photo analyses through S3, Step Functions and AgentCore Runtime produced one shared case and an immutable draft. That historical result does not establish Clerk acceptance.
 
-The bounded cloud path from uploaded photos to a shared draft passed: two actual photo analyses through S3, Step Functions and AgentCore Runtime, exact registry routing and Coordinator preparation, one canonical case containing two observations, an immutable draft, and privacy checks. The journey intentionally stopped before approval; it performed no browser submission or agency closure. The initial Bedrock account-verification gate cleared at 07:31 UTC and is historical.
+AgentCore Browser remains unresolved: custom and built-in sessions reported READY with automation ENABLED but automation-stream HTTP 404 before navigation. The initial Bedrock account-verification gate cleared at 07:31 UTC on 2026-09-14. It is not an established cause of the Browser failure. Approval, remote attachment transfer, receipt and closure remain unverified. See [current AWS status](AWS-STATUS.md). The receiving agency is fictional.
 
-Custom and built-in Browser sessions report `READY` with automation `ENABLED`, but their automation streams persistently return HTTP 404 before page navigation. Neither IAM nor the historical Bedrock verification gate has been established as the cause. Remote attachment transfer and the complete approval → submission → receipt → closure workflow remain unverified. See [current AWS status](AWS-STATUS.md).
+## Local preparation
 
-**Evidence boundary:** the live result above establishes the bounded photo-to-shared-draft path. Local tests and synthesis provide separate contract evidence: the final Python suite passed 106 tests with four opt-in AWS smoke tests skipped. Those skips do not negate the separately executed live journey, and the journey does not establish the untested submission and closure stages.
-
-The receiving agency remains fictional in every mode. This project contains no authorized real municipal adapter.
-
-## Reproducible preparation (no cloud writes)
-
-From the repository root:
+Run from the repository root:
 
 ```sh
 uv sync --all-extras
@@ -20,134 +14,138 @@ npm --prefix infra/cdk ci
 npm --prefix infra/cdk run build
 npm --prefix infra/cdk test
 npm --prefix infra/cdk run synth
-uv run --all-extras pytest tests/test_agents.py tests/test_aws_smoke.py -q
+.venv/bin/python -m pytest tests/test_aws_admin.py tests/test_frontend_artifact.py tests/test_aws_journey_script.py -q
+node --test tests/aws_frontend_support.test.mjs
 ```
 
-`infra/cdk/cdk.out/NeighborhoodFixer.template.json` is the synthesized template. CDK synth registers Docker assets without building or deploying them. Python dependencies are pinned in `uv.lock`; CDK has an independent `infra/cdk/package-lock.json`. Dockerfiles use uv 0.11.2, matching the locally verified frozen export, and Linux ARM64 Python 3.13.
-
-Validate both deployment images with Docker before deployment:
+Synthesis registers Docker assets without deploying them. Dependencies are pinned in the Python and independent infrastructure lockfiles. The ARM64 Lambda and Runtime images have previously built and passed local startup checks; rebuild them for changed backend source:
 
 ```sh
 docker build --platform linux/arm64 -f infra/cdk/Dockerfile.lambda -t neighborhood-fixer-lambda .
 docker build --platform linux/arm64 -f infra/cdk/Dockerfile.runtime -t neighborhood-fixer-runtime .
 ```
 
-Local container checks passed: Lambda API/portal/worker/bootstrap imports, emulated API health 200 and fixture login 403, plus non-root AgentCore ping 200 and rejection of an unauthorized case. These checks did not contact AWS.
+Docker contexts allowlist application source, fixtures and build inputs; private environments, credentials, evidence, generated outputs and caches are excluded. Review current image findings separately; a successful build is not a vulnerability scan.
 
-The default AWS path runs Issue Analyst first, then Routing Specialist, and prepares wording with an actual Routing Specialist → Case Coordinator Strands graph. The graph rechecks the configured recipient and cannot authorize or perform an external write.
+## Clerk and AWS configuration
 
-The Runtime image launches `python -m services.agents.runtime`; the SDK serves the documented HTTP contract on port 8080. Lambda's bootstrap retrieves the generated portal service secret into process memory for the worker and portal before importing their handlers. The API does not request that secret; AWS resident authentication uses Cognito. The bootstrap does not print secret values. The portal and API are separate Lambda entrypoints in the same modular application image.
+Provision and claim the reviewed Clerk development instance before deployment. Keep public signup closed during validation. In Clerk Sessions → Customize session token, configure the ordinary session token with:
 
-## Account and endpoint prerequisites
-
-Use an explicitly authorized AWS account and `us-west-2` (the verified default intersection for Runtime, Browser, and Nova 2 Lite). Configure CLI authentication yourself. Confirm service quotas and access to `us.amazon.nova-2-lite-v1:0`; this is the US geographic inference profile, so requests may be processed in supported US destination regions. The parameter is explicit, but choosing another model also requires reviewing IAM model resource ARNs and capabilities.
-
-Leave `FrontendOrigin` empty for the generated Amplify URL. The stack derives `https://main.<Amplify DefaultDomain>` and outputs it as `WebUrl`; API CORS, Cognito and map-key referrer restrictions use that URL during the first deployment. The Amplify app has no backend-dependent settings; branch environment settings reference the completed backend, avoiding a dependency cycle. For an owner-configured custom domain, set `FrontendOrigin` to its exact HTTPS origin without a trailing slash. Cognito callback and logout URLs both append `/`; `VITE_COGNITO_REDIRECT_URI` must match exactly. CDK creates an empty app and branch; it does not connect GitHub, configure custom-domain DNS, or publish files. [Amplify App DefaultDomain](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-amplify-app.html), [branch environment settings](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-amplify-branch.html).
-
-Cognito self-registration is disabled. Provision invited test residents through Cognito admin tooling; password and MFA setup remain resident-controlled. Cloud cases default to one workspace per Cognito `sub`. For the two-neighbor cloud demo, an administrator can provision exact existing Cognito subjects into one reviewed workspace using the command below. The API reads the server-side membership record on every request; callers cannot choose a workspace through headers. No fixture identity selector exists in AWS mode.
-
-```sh
-# Read-only validation against the authorized table:
-uv run --all-extras python infra/cdk/provision_workspace.py \
-  --workspace DEMO_WORKSPACE_ID --user-sub RESIDENT_A_SUB --user-sub RESIDENT_B_SUB
-# After reviewing this exact membership change, add --apply to write it.
+```json
+{"aud":"neighborhood-fixer-api","scope":"nf:resident"}
 ```
 
-The command refuses reassignment of an existing resident to another workspace. Membership records live in a reserved auth partition. The application exposes no HTTP membership-write endpoint; the provision script uses administrative AWS credentials. Trusted API/worker IAM roles have table write access, so these are application-enforced membership boundaries, not per-partition IAM isolation. A resident can contribute to a shared case but still cannot approve another resident's draft or read their private evidence.
+The frontend uses the default session token and retains its session binding. API Gateway validates the exact issuer, audience and required scope. The backend independently checks the trusted claims, exact authorized frontend origin in `azp`, active version-2 session identity and expiry. A valid token still needs the configured workspace generation and admission policy. Client metadata cannot choose membership. [Clerk session customization](https://clerk.com/docs/guides/sessions/customize-session-tokens), [HTTP API JWT authorizers](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html).
 
-## Deploy only after explicit account/environment approval
+Required CloudFormation parameters are `ClerkIssuerUrl` (exact HTTPS development issuer), `ClerkPublishableKey` (matching `pk_test_` public key), and `DataGeneration` (explicit deployment generation). `AuthAudience` is fixed to `neighborhood-fixer-api`; `SharedWorkspaceId` defaults to `demo-borough-v1`. No Clerk secret key is passed to Lambda, Runtime, Vite, or stack outputs.
 
-These commands create billable AWS resources in the explicitly selected account. The application-specific asset path uses the current CLI credentials for asset publication and CloudFormation. It creates a private retained S3 bucket and retained ECR repository, without persistent deployment roles. Credentials must remain valid throughout deployment. [CDK current-credential synthesizer](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.CliCredentialsStackSynthesizer.html).
+Leave `FrontendOrigin` empty to derive `https://main.<Amplify DefaultDomain>`. For an already configured custom domain, set its exact HTTPS origin without a trailing slash. API CORS, backend authorized parties and the map key referrer use this origin. Amplify branch settings supply the public Clerk key. Public health and explicit OPTIONS routes allow login bootstrapping; all private routes require JWT scope `nf:resident`. CORS permits Authorization, Content-Type and Idempotency-Key. [Amplify App](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-amplify-app.html), [HTTP API CORS](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-cors.html).
+
+Default per-resident UTC-day limits are 10 new observations, 25 accepted uploads and 30 reasoning jobs. Atomic workspace UTC-day limits cap the shared demo at 100 new observations, 250 accepted uploads and 300 reasoning jobs across all identities. Failed model starts count, while idempotent retries and worker redelivery do not create another quota charge. Upload and observation requests require an Idempotency-Key, and decision requests are deduplicated by resident, observation revision and selected outcome. API Gateway throttles at 10 requests/second with burst 20. All six daily limits and both request-rate limits are bounded CloudFormation parameters. The workspace controls constrain disposable-account abuse, but they are application limits rather than an AWS account spending cap.
+
+## Deploy the validation generation
+
+Use only the explicitly authorized account and region; the verified service intersection is `us-west-2`. Nova 2 Lite uses the US inference profile `us.amazon.nova-2-lite-v1:0`; another model requires an IAM/capability review. The app-specific asset stack uses current CLI credentials without persistent administrator deployment roles. [CDK credential synthesizer](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.CliCredentialsStackSynthesizer.html).
 
 ```sh
 export AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2
-# Check the returned account against the explicitly authorized account first:
 aws sts get-caller-identity --query Account --output text
 export NF_DEPLOY_ACCOUNT=AUTHORIZED_ACCOUNT_ID
 export NF_ASSET_BUCKET="nf-assets-${NF_DEPLOY_ACCOUNT}-${AWS_REGION}"
 export NF_ASSET_REPOSITORY=neighborhood-fixer-assets
 cd infra/cdk
 npx cdk synth --quiet
-aws cloudformation deploy \
-  --template-file cdk.out/NeighborhoodFixerAssets.template.json \
-  --stack-name NeighborhoodFixerAssets
-npx cdk diff NeighborhoodFixer
-npx cdk deploy NeighborhoodFixer \
-  --parameters BedrockModelId=us.amazon.nova-2-lite-v1:0 \
-  --parameters MapKeyExpiry=2026-10-14T00:00:00Z \
+# Required only when this app's asset stack is not already deployed:
+aws cloudformation deploy --template-file cdk.out/NeighborhoodFixerAssets.template.json --stack-name NeighborhoodFixerAssets
+npx cdk diff NeighborhoodFixer -c retainLegacyCognito=true
+npx cdk deploy NeighborhoodFixer -c retainLegacyCognito=true \
+  --parameters ClerkIssuerUrl="$NF_CLERK_ISSUER" \
+  --parameters ClerkPublishableKey="$NF_CLERK_PUBLISHABLE_KEY" \
+  --parameters DataGeneration=clerk-validation-v1 \
+  --parameters MapKeyExpiry=REVIEWED_FUTURE_ISO_TIMESTAMP \
   --outputs-file ../../.local/aws-outputs.json
 ```
 
-Both `NF_ASSET_BUCKET` and `NF_ASSET_REPOSITORY` must remain set together for later synth, diff, deploy and destroy operations. S3 asset uploads require TLS; the bucket is encrypted and versioned. ECR uses immutable content-hash tags, scan-on-push and an untagged-image expiration rule; tagged images are retained so a running Lambda or Runtime does not lose its image. The deployment principal must have the required CloudFormation, asset publication and service creation permissions, including Lambda's documented ECR access. [Lambda image permissions](https://docs.aws.amazon.com/lambda/latest/dg/images-create.html).
+For this existing-stack migration only, `retainLegacyCognito=true` preserves the original pool/client/domain while the API switches to Clerk. It does not preserve a second API login path. The final source and deployment must remove this temporary helper and context option after successful Clerk validation. A fresh installation needs no legacy option. Keep both asset environment variables set together for subsequent synth/diff/deploy. An existing owner-approved standard CDK bootstrap is an optional alternative when both variables are omitted.
 
-An existing owner-approved standard CDK bootstrap environment is an optional alternative: omit both asset variables to use `DefaultStackSynthesizer` and its configured bootstrap roles. Review that environment's roles and trust policies before using it; creating a standard bootstrap stack is a separate infrastructure change. The application-specific path above does not require `cdk bootstrap`.
+The stack contains three Lambda entrypoints, HTTP API, two private DynamoDB tables, versioned evidence S3, Standard workflow, AgentCore Runtime/Browser, scoped IAM, logs, Amplify and Amazon Location. Runtime uses IAM, not browser credentials. Worker and portal bootstrap fetch only their portal service secret into memory. No VPC/NAT is created. S3/ECR asset resources are retained, encrypted and private.
 
-The output file contains identifiers and URLs, never server secret values. The actual HTTPS `PortalUrl` Function URL is injected into the worker. No cloud browser points at localhost. AgentCore Runtime uses IAM authorization; the frontend receives no permission to invoke it directly. API Gateway verifies Cognito JWTs before the application trusts `requestContext.authorizer.jwt.claims`.
-
-Resources: API Lambda, worker Lambda, fictional portal Lambda, Cognito user pool/client, HTTP API, records and portal DynamoDB tables, private evidence S3 bucket, Standard workflow, custom AgentCore Browser, AgentCore Runtime container, scoped IAM roles, CloudWatch logs, Amplify app/branch, and an Amazon Location map with an expiring map-only referrer-restricted API key. No VPC or NAT gateway is created.
-
-## Frontend configuration and publishing
-
-Run the following application commands from the repository root. Set build-time Vite settings using `apps/web/.env.example`; the example region is `us-west-2`; use the actual deployed region. AWS settings are never a substitute for deployed verification:
-
-- `VITE_API_BASE_URL` = `ApiUrl` output, without an added `/api` suffix; the client appends API paths.
-- `VITE_AWS_REGION` = deployed region; `VITE_COGNITO_CLIENT_ID` = `UserPoolClientId`; `VITE_COGNITO_DOMAIN` = `CognitoDomain`; `VITE_COGNITO_REDIRECT_URI` = `WebUrl` plus `/`.
-- `VITE_LOCATION_MAP_NAME` = `LocationMapName`; `VITE_LOCATION_API_KEY` = the restricted public map API key's value. This key is designed for browser use and is restricted to map rendering, one map ARN, the configured referrer, and an explicit expiry. It is not an AWS access key. Retrieve its value using the authenticated Location console or `DescribeKey` into a local ignored environment file; do not paste it into source, chat, or logs.
-- The frontend determines local/AWS mode from `/api/health`, not a build-time mode flag. Keep that health route reachable without authentication so the Cognito sign-in screen can load; all private API routes remain JWT protected.
-
-After loading the restricted public key privately as `NF_LOCATION_API_KEY`, build a deployment ZIP directly from the stack outputs:
+Initialize only the reviewed validation subjects using the administrator CLI. Omit `--apply` first to inspect the target; the API never initializes an AWS workspace itself:
 
 ```sh
-python3 scripts/build_amplify_artifact.py \
+.venv/bin/python scripts/manage_aws_demo.py initialize \
+  --expected-account "$NF_DEPLOY_ACCOUNT" --region "$AWS_REGION" \
+  --generation clerk-validation-v1 --subject CLERK_USER_A --subject CLERK_USER_B
+# Add --apply after reviewing the target and subject list.
+```
+
+This creates one inert, clearly marked sample case and validation admission. The sample has no uploaded evidence, ticket, approval, job or subscription; it cannot be submitted or matched as a real neighbor report.
+
+## Build, publish and validate
+
+Public frontend settings are `VITE_CLERK_PUBLISHABLE_KEY`, `VITE_API_BASE_URL`, region and Amazon Location map configuration. The API base is the output origin without an extra /api suffix. Retrieve the restricted map-only key privately into `NF_LOCATION_API_KEY`; never print its value. Build from current stack outputs:
+
+```sh
+AWS_REGION=us-west-2 python3 scripts/build_amplify_artifact.py \
   --outputs .local/aws-outputs.json --stack NeighborhoodFixer --install
 ```
 
-The script validates deployed origins, sets Vite build values and produces `.local/amplify/frontend.zip` with a root `index.html` plus a configuration manifest that excludes the map-key value. It makes no cloud writes. Upload that ZIP to the created Amplify app's `main` branch using Amplify manual deployment as part of the authorized application deployment. The repository includes an Amplify build specification and branch environment settings in CDK for a future owner-authorized repository connection. Manual deployment uploads already-built files, so the local build must receive these values too; branch settings do not rewrite an uploaded bundle. No repository token is stored in CDK. Verify the registered root callback URL, deep-link refreshes, API CORS, map tiles and login/logout on the actual deployed origin.
+The builder checks the Clerk key/issuer match and creates `.local/amplify/frontend.zip` plus a configuration manifest excluding the map key. Publish the ZIP to the authorized Amplify branch. Manual deployment does not substitute branch environment settings into a prebuilt bundle. Keep secret keys and token files out of source control.
 
-## Fictional agency status changes in AWS
-
-Cloud ticket status management is **disabled by default**. To enable the operator path for a reviewed AWS demo, update the stack with `--parameters DemoStatusManagementEnabled=true`, preserving any configured custom-origin override. This maps only the portal Lambda to `NF_ENABLE_DEMO_STATUS_MANAGEMENT=true`. The endpoint also requires `NF_MODE=aws`, `NF_ENVIRONMENT=demo`, and the portal service secret; production still rejects it. The browser-facing app's identity switching, reset, virtual-clock and local scenario endpoints remain disabled in AWS.
-
-After the deployed report has a receipt, run the operator command from the repository root using the authorized AWS account:
+With a reviewed admitted Clerk account and credentials in private environment variables `NF_AWS_SMOKE_USERNAME` and `NF_AWS_SMOKE_PASSWORD`:
 
 ```sh
-uv run --all-extras python scripts/set_demo_ticket_status.py \
-  --stack-name NeighborhoodFixer --region us-west-2 \
-  --receipt-id ACTUAL_DEMO_RECEIPT_ID --status CLOSED \
-  --closure-note 'Fictional agency reports completion; resident verification is still pending.' \
-  --confirm
+NF_RUN_AWS_BROWSER_SMOKE=1 npm run test:aws:web -- \
+  --config .local/amplify/frontend.manifest.json
 ```
 
-Omit `--confirm` to preview the exact target and proposed status without fetching the secret or writing. If a write's response is lost, rerun the command with `--inspect` instead of `--status`, `--closure-note`, and `--confirm` to read the persisted outcome before considering another update.
+Run independently for both residents. The smoke checks real CORS including Idempotency-Key, sign-in, authenticated read-only API, map style/tiles/attribution, token renewal after 70 seconds, page refresh, logout and rejected local controls. It does not create reports. MFA, email verification and CAPTCHA remain owner-controlled. No failure DOM, screenshots, traces or raw exceptions are exported.
 
-The operator needs CloudFormation `DescribeStacks` and Secrets Manager `GetSecretValue` for the stack's portal secret. The command derives `PortalUrl` and `PortalSecretArn` from the trusted stack outputs, checks that the portal is an enabled AWS demo, fetches the secret into memory and sends a single status update without following redirects. It does not accept an arbitrary recipient URL or print the secret. Stack outputs include the secret ARN, never its value.
+For a separately authorized backend journey, add `--session-output .local/aws-sessions/alex.json --keep-session-seconds 600` (use a different file/account for the second helper). The explicitly requested short-lived bearer token stays in an atomic mode-0600 file. The journey driver rereads it before each request and refuses expired tokens or changed user/workspace/origin. The keeper ends with sign-out; remove private exports after use. Ordinary frontend code does not copy tokens to browser storage.
 
-Status changes are persisted by the portal's normal application transition. Run the demo update while the bounded status-read workflow is active (12 checks at 60-second intervals by default), then wait for its next real check; the operator command does not advance AWS time. Agency `CLOSED` still leaves physical resolution awaiting optional resident verification. Disable the operator path after the demo by redeploying with `DemoStatusManagementEnabled=false`. This path is implemented for deployment validation but has not been exercised against AWS.
+Live cutover acceptance must include both accounts, wrong issuer/audience/origin/scope rejection, unadmitted-user rejection, private photo/draft ownership, same shared workspace, idempotent retries, quota exhaustion, token renewal/logout and the authorized bounded photo-to-shared-draft journey. Browser submission remains blocked until the independent stream issue is resolved. Do not call a historical Cognito journey proof a Clerk validation.
 
-## Deployment validation
+## Reviewed reset and public opening
 
-Export stack outputs into a private shell environment as `NF_TABLE_NAME`, `NF_EVIDENCE_BUCKET`, `NF_AGENTCORE_RUNTIME_ARN`, `NF_AGENTCORE_BROWSER_ID`, `NF_PORTAL_URL`, `NF_AWS_API_URL`, and `AWS_REGION`. Then, only with approval for billable smoke calls:
+This operation deletes all active records in this app's two tables and every evidence object version/delete marker/multipart upload. It must follow successful Clerk validation and explicit authorization for those exact data consequences. Deployment assets, application infrastructure and account audit logs are not reset.
+
+1. Close admission with `admission --generation clerk-validation-v1 --admission maintenance --apply`; preview without --apply first.
+2. Run `quiesce --generation clerk-validation-v1`, then the reviewed `--apply` to stop only this stack's running workflows and custom Browser sessions.
+3. Deploy `DataGeneration=clerk-public-v1`, still retaining the old pool. Existing control remains on the old generation, so API and worker paths fail closed.
+4. Create the private reset manifest:
 
 ```sh
-NF_RUN_AWS_SMOKE=1 uv run --all-extras pytest tests/test_aws_smoke.py -q
+.venv/bin/python scripts/manage_aws_demo.py plan-reset \
+  --expected-account "$NF_DEPLOY_ACCOUNT" --region "$AWS_REGION" \
+  --generation clerk-validation-v1 --next-generation clerk-public-v1 \
+  --subject CLERK_USER_A --subject CLERK_USER_B \
+  --manifest .local/clerk-reset.json
 ```
 
-The four smoke tests inspect private storage, run the Routing Specialist through actual AgentCore Runtime, open an AgentCore Browser session at the fictional portal, and check health plus unauthenticated rejection of the fixture-login endpoint. They do not test real multimodal analysis, the report-preparation graph, an authenticated development-control rejection, or a complete Step Functions execution. They never submit a report. The full authenticated report → approval → one browser write → receipt → agency closure → resident verification story needs separate testing against a dedicated demo workspace. Use the explicitly enabled operator status path above to drive the fictional agency response; no AWS clock is advanced. Missing environment, permission, model, routing, or browser configuration must fail visibly; there is no fixture fallback.
+Every administrator command requires the account, region and generation flags shown above; `--stack-name` defaults to NeighborhoodFixer. The plan pins the stack ARN and owned resources, scans every DynamoDB page, enumerates all S3 versions/delete markers/multipart pages, and prints only counts plus its SHA256. Review that inventory. Wait the required 360-second drain window; plans expire after one hour.
 
-AWS uploads are capped at 4 MiB per image, and the browser executor and portal cap combined submission attachments at 4 MiB to leave room for Lambda's encoded request envelope. Local uploads allow 8 MiB per image. Remote attachment transfer is still untested.
+```sh
+.venv/bin/python scripts/manage_aws_demo.py apply-reset \
+  --expected-account "$NF_DEPLOY_ACCOUNT" --region "$AWS_REGION" \
+  --generation clerk-public-v1 --manifest .local/clerk-reset.json \
+  --manifest-sha256 REVIEWED_MANIFEST_SHA256
+# To apply the exact reviewed deletion, add --validated-clerk --apply.
+```
 
-The Lambda worker has a five-minute invocation timeout. `WorkerReservedConcurrency` defaults to `0`, which this template translates to no reservation; it does not set Lambda's zero-concurrency throttle. Set the parameter to a reviewed positive value such as `3` only if the account quota permits it. API and portal concurrency are unreserved. AWS requires keeping 100 account concurrency units unreserved, so fixed reservations can prevent deployment in accounts with low quotas. [Lambda reserved concurrency](https://docs.aws.amazon.com/lambda/latest/dg/configuration-concurrency.html). Each model phase has at most 8 model calls, 16 tool calls, and 120 seconds; the tool budget cancels excess calls and the graph enforces a deadline. Bedrock transport retries are capped at two total attempts. The browser session has a maximum 300-second lifetime, and the form executor has its own shorter deadline. Safe status reads have bounded retries and 12 configured checks; ambiguous external writes are never automatically retried.
+Apply repeats account/resource/generation/admission/work checks and refuses new inventory entries. Any deletion error stops before initialization. Explicit `--resume` permits only a remaining subset of the same reviewed manifest, within its expiry; inspect failures rather than creating an automatic new plan.
 
-These are operational limits, not a hard spending cap. Cost budgets/alerts and an account owner-reviewed teardown date are recommended before running a public demo.
+The reset seeds the new generation in validation admission and verifies exactly one sample incident/observation, no job/ticket/approval/attempt/callback, empty portal data and no S3 versions/uploads. `verify-reset --generation clerk-public-v1` repeats this read-only check. It must pass before public admission.
 
-## Observability and recovery
+After a fresh hosted read-only validation against the new generation, remove the temporary legacy helper/import/context/test from source and deploy the final Clerk-only template. The old pool is retained by CloudFormation. Delete only the exact pool captured in the reviewed manifest with `delete-legacy-cognito --generation clerk-public-v1 --manifest .local/clerk-reset.json --manifest-sha256 REVIEWED_MANIFEST_SHA256 --validated-clerk --apply`, plus the required account/region flags. The tool refuses a pool still managed by the current stack. Then retire this migration-only delete command/source.
 
-`services/agents/observability.py` exports allowlisted OpenTelemetry operation spans as structured CloudWatch log records with trace ID, duration, operation type, outcome and tool count. It deliberately omits prompt text, tool arguments, images, private model reasoning and arbitrary exception content. The response contains actual provider usage only when the SDK returns it. No token costs are inferred. Strands verbose logs and AgentCore browser recording are disabled.
+Finally configure Clerk public signup, and run the reviewed `admission --generation clerk-public-v1 --admission public --validated-clerk --apply`. This command reruns the clean sample verification before opening the server policy. Verify a fresh signup joins the server-selected Demo Borough, sees the single sample, and remains subject to ownership checks and quotas.
 
-Standard workflow CloudWatch logs exclude execution data. Execution history still contains workflow inputs and callback task payloads and therefore requires restricted AWS operator access. Callback tokens stay in private application records and Lambda task payloads, never HTTP responses or browser state. The initial decision workflow waits for its exact revision, while approved submission runs as a separate persisted operation; the existing domain reservation remains the authority. Approval-before-registration is reconciled from the committed attempt/approval. Consumed tokens are removed. Expired or superseded callbacks cannot authorize a write.
+Before deletion, rollback may restore the previous application, authorizer and frontend because the legacy pool/data remain. After data deletion or pool deletion, that rollback is no longer available. Generation fencing prevents old jobs from recreating active state; it does not erase AWS execution history, logs, DynamoDB point-in-time recovery or backups. Their retention/deletion needs a separate scoped inventory. Never equate this app reset with erasing all historical cloud data.
 
-If dispatch fails, the operation remains persisted with an actionable API error. After correcting configuration, a server administrator may call `start_operation(workspace_id, operation_id)` for that exact persisted operation. Duplicate StartExecution names do not create a second operation. Do not generate a new submission attempt to recover a lost receipt. Use the case's reconcile action, which performs receipt lookup only.
+## Fictional portal operation and teardown
 
-## Teardown and retained data
+`DemoStatusManagementEnabled` defaults false. A reviewed demo may enable it for the portal only; the endpoint additionally requires AWS demo mode and the service secret. The administrator `scripts/set_demo_ticket_status.py` derives the exact portal and secret ARN from stack outputs, checks mode, previews without --confirm and sends one confirmed status update. Use --inspect after an ambiguous response. It never changes AWS time or enables browser identity switching/reset. Agency CLOSED still requires optional resident verification.
 
-After explicit teardown approval, review `cdk diff` and run `npx cdk destroy NeighborhoodFixer`. Evidence, both DynamoDB tables, and the Cognito pool are intentionally **retained**. Runtime/Browser resources, workflow, hosting, and explicitly created application log groups are removed according to their resource policies. Runtime-created `/aws/bedrock-agentcore/runtimes/*` log groups are not explicit CDK resources here and may remain; inspect their retention and deletion separately. The separate `NeighborhoodFixerAssets` stack and its S3/ECR assets remain. Deleting that asset stack still retains the bucket and repository. If the optional standard bootstrap path was used, its assets and bootstrap resources may also remain. Inventory those resources in the authorized account and delete them only after the owner approves the exact data/retention consequences. Never infer that `cdk destroy` removed retained personal data or all continuing charges.
+AWS images are capped at 4 MiB; combined submission attachments also cap at 4 MiB for Lambda's request envelope. Worker timeout is five minutes, model/tool calls and status checks are bounded, and ambiguous external writes are never automatically retried. WorkerReservedConcurrency=0 omits a reservation rather than setting a zero-concurrency throttle. Logs omit prompts, tool arguments, images and arbitrary exception text, while private workflow execution history remains restricted operator data.
+
+After explicit teardown approval, review the current diff before destroying application resources. Evidence, both DynamoDB tables and asset S3/ECR are retained; inspect runtime-created log groups and historical recovery data separately. No retained resource is implicitly authorized for deletion by an infrastructure destroy.

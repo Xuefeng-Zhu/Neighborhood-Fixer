@@ -3,8 +3,9 @@
 Required: --outputs <CDK outputs.json or AWS describe-stacks.json>, AWS_REGION,
 and NF_LOCATION_API_KEY in private environment (a referrer-restricted PUBLIC map key).
 Use --stack to select one stack when the file contains several. Outputs must contain
-WebUrl, ApiUrl, CognitoDomain, UserPoolClientId, and LocationMapName. --web-origin may
-override WebUrl only after the same origin is registered in Cognito, API CORS, and the
+WebUrl, ApiUrl, ClerkIssuerUrl, ClerkPublishableKey, AuthAudience, and LocationMapName.
+--web-origin may override WebUrl only after the same origin is registered in Clerk,
+the backend authorized-party allowlist, API CORS, and the
 Location key restriction. --install runs npm ci first; otherwise use installed pinned
 dependencies. The manifest can configure scripts/aws_browser_smoke.mjs.
 
@@ -13,6 +14,7 @@ The key is never included in logs or the manifest. Keep deployment artifacts pri
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -86,8 +88,9 @@ def frontend_environment(outputs, env, web_origin=None):
     for key in (
         "WebUrl",
         "ApiUrl",
-        "CognitoDomain",
-        "UserPoolClientId",
+        "ClerkIssuerUrl",
+        "ClerkPublishableKey",
+        "AuthAudience",
         "LocationMapName",
     ):
         value = web_origin if key == "WebUrl" and web_origin else outputs.get(key)
@@ -102,17 +105,32 @@ def frontend_environment(outputs, env, web_origin=None):
         raise BuildError(
             "Set NF_LOCATION_API_KEY privately to the restricted public map key."
         )
-    if not re.fullmatch(r"[A-Za-z0-9]+", values["UserPoolClientId"]):
-        raise BuildError("UserPoolClientId is invalid.")
+    issuer = origin(values["ClerkIssuerUrl"], "ClerkIssuerUrl")
+    if not re.fullmatch(r"https://[a-zA-Z0-9-]+\.clerk\.accounts\.dev", issuer):
+        raise BuildError(
+            "ClerkIssuerUrl must identify the configured development instance."
+        )
+    clerk_key = values["ClerkPublishableKey"]
+    try:
+        if not re.fullmatch(r"pk_test_[A-Za-z0-9_-]+", clerk_key):
+            raise ValueError()
+        encoded = clerk_key.removeprefix("pk_test_")
+        host = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+        if host != urlparse(issuer).hostname + "$":
+            raise ValueError()
+    except (ValueError, UnicodeError):
+        raise BuildError(
+            "Clerk publishable key must match the configured issuer."
+        ) from None
+    if values["AuthAudience"] != "neighborhood-fixer-api":
+        raise BuildError("AuthAudience must match the configured resident API.")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", values["LocationMapName"]):
         raise BuildError("LocationMapName is invalid.")
-    web = origin(values["WebUrl"], "WebUrl")
+    origin(values["WebUrl"], "WebUrl")
     return {
         "VITE_API_BASE_URL": origin(values["ApiUrl"], "ApiUrl"),
         "VITE_AWS_REGION": region,
-        "VITE_COGNITO_DOMAIN": origin(values["CognitoDomain"], "CognitoDomain"),
-        "VITE_COGNITO_CLIENT_ID": values["UserPoolClientId"],
-        "VITE_COGNITO_REDIRECT_URI": web + "/",
+        "VITE_CLERK_PUBLISHABLE_KEY": clerk_key,
         "VITE_LOCATION_MAP_NAME": values["LocationMapName"],
         "VITE_LOCATION_API_KEY": key,
     }
@@ -192,7 +210,7 @@ def main(argv=None):
         child_env = {
             name: value
             for name, value in os.environ.items()
-            if not name.startswith(("AWS_", "NF_", "VITE_"))
+            if not name.startswith(("AWS_", "NF_", "VITE_", "CLERK_"))
         }
         child_env.update(frontend)
         if args.install:
@@ -203,11 +221,12 @@ def main(argv=None):
             "schema_version": 1,
             "artifact": {"filename": args.output.name, **metadata},
             "frontend": {
-                "web_url": frontend["VITE_COGNITO_REDIRECT_URI"].rstrip("/"),
+                "web_url": origin(args.web_origin or outputs["WebUrl"], "WebUrl"),
                 "api_url": frontend["VITE_API_BASE_URL"],
                 "aws_region": frontend["VITE_AWS_REGION"],
-                "cognito_domain": frontend["VITE_COGNITO_DOMAIN"],
-                "cognito_client_id": frontend["VITE_COGNITO_CLIENT_ID"],
+                "clerk_issuer": origin(outputs["ClerkIssuerUrl"], "ClerkIssuerUrl"),
+                "clerk_publishable_key": frontend["VITE_CLERK_PUBLISHABLE_KEY"],
+                "auth_audience": outputs["AuthAudience"],
                 "location_map_name": frontend["VITE_LOCATION_MAP_NAME"],
             },
         }

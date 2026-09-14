@@ -1,5 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+const evidenceDir =
+  process.env.NF_SCREENSHOT_DIR || '/private/tmp/neighborhood-fixer-e2e';
 async function report(page: Page, share = true) {
   await page.goto('/report');
   await page
@@ -45,9 +48,9 @@ test('two residents share one report, distinguish closure and verify the repair'
     'data-map-ready',
     'true',
   );
-  await mkdir('docs/verification', { recursive: true });
+  await mkdir(evidenceDir, { recursive: true });
   await page.screenshot({
-    path: 'docs/verification/neighborhood-desktop.png',
+    path: join(evidenceDir, 'neighborhood-desktop.png'),
     fullPage: true,
   });
   await report(page);
@@ -80,7 +83,7 @@ test('two residents share one report, distinguish closure and verify the repair'
     'true',
   );
   await page.screenshot({
-    path: 'docs/verification/neighborhood-desktop.png',
+    path: join(evidenceDir, 'neighborhood-desktop.png'),
     fullPage: true,
   });
   await page.goto(caseUrl);
@@ -131,12 +134,12 @@ test('two residents share one report, distinguish closure and verify the repair'
   await expect(page.getByText('2 observations', { exact: true })).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({
-    path: 'docs/verification/case-mobile.png',
+    path: join(evidenceDir, 'case-mobile.png'),
     fullPage: false,
   });
   await page.setViewportSize({ width: 1536, height: 1024 });
   await page.screenshot({
-    path: 'docs/verification/case-desktop.png',
+    path: join(evidenceDir, 'case-desktop.png'),
     fullPage: true,
   });
   expect(errors).toEqual([]);

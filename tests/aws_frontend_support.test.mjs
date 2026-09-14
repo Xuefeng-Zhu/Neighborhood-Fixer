@@ -18,6 +18,8 @@ import {
   probeAuthenticatedApi,
   sessionOutputPath,
   smokeConfig,
+  signedOutEntry,
+  tokenMetadata,
   writeSessionExport,
 } from '../scripts/aws_browser_smoke.mjs';
 
@@ -26,14 +28,54 @@ const manifest = {
     web_url: 'https://main.example.amplifyapp.com',
     api_url: 'https://example.execute-api.us-west-2.amazonaws.com',
     aws_region: 'us-west-2',
-    cognito_domain: 'https://example.auth.us-west-2.amazoncognito.com',
-    cognito_client_id: 'exampleclient123',
+    clerk_issuer: 'https://example.clerk.accounts.dev',
+    auth_audience: 'neighborhood-fixer-api',
   },
 };
 const privateEnv = {
   NF_AWS_SMOKE_USERNAME: 'private-account@example.invalid',
   NF_AWS_SMOKE_PASSWORD: 'private-test-only-placeholder',
 };
+
+test('the application sign-in entry is a link for entry and post-logout checks', () => {
+  const result = {};
+  const page = {
+    getByRole(role, options) {
+      assert.equal(role, 'link');
+      assert.deepEqual(options, { name: 'Sign in', exact: true });
+      return result;
+    },
+  };
+  assert.equal(signedOutEntry(page), result);
+});
+
+test('session metadata extraction includes binding fields and excludes private profile claims', () => {
+  const payload = {
+    exp: 4102444800,
+    iss: manifest.frontend.clerk_issuer,
+    aud: 'neighborhood-fixer-api',
+    azp: manifest.frontend.web_url,
+    scope: 'nf:resident',
+    sid: 'sess_synthetic',
+    email: 'private@example.invalid',
+  };
+  const token =
+    'header.' +
+    Buffer.from(JSON.stringify(payload)).toString('base64url') +
+    '.signature';
+  assert.deepEqual(tokenMetadata(token), {
+    expiresAt: 4102444800000,
+    issuer: payload.iss,
+    audience: payload.aud,
+    origin: payload.azp,
+    scope: payload.scope,
+    session: payload.sid,
+  });
+  assert.throws(
+    () => tokenMetadata('private-invalid-value'),
+    /^Error: A verified Clerk session token is required\.$/,
+  );
+});
 
 test('deployment manifest configures browser targets without storing account credentials', () => {
   const config = smokeConfig(privateEnv, manifest);
@@ -235,22 +277,8 @@ test('session export refuses a destination symlink without replacing its target'
 
 test('one rejected API fetch yields a fixed diagnostic while remaining probes complete', async () => {
   const savedFetch = globalThis.fetch;
-  const savedStorage = Object.getOwnPropertyDescriptor(
-    globalThis,
-    'sessionStorage',
-  );
   const requested = [];
   try {
-    Object.defineProperty(globalThis, 'sessionStorage', {
-      configurable: true,
-      value: {
-        getItem: () =>
-          JSON.stringify({
-            accessToken: 'private-test-token',
-            expiresAt: Date.UTC(2099, 0, 1),
-          }),
-      },
-    });
     globalThis.fetch = async (url) => {
       const path = new URL(url).pathname;
       requested.push(path);
@@ -267,7 +295,11 @@ test('one rejected API fetch yields a fixed diagnostic while remaining probes co
         }),
       };
     };
-    const result = await probeAuthenticatedApi(manifest.frontend.api_url);
+    const result = await probeAuthenticatedApi({
+      api: manifest.frontend.api_url,
+      accessToken: 'private-test-token',
+      expiresAt: Date.UTC(2099, 0, 1),
+    });
     assert.deepEqual(requested, [
       '/api/session',
       '/api/incidents',
@@ -283,13 +315,11 @@ test('one rejected API fetch yields a fixed diagnostic while remaining probes co
       false,
     );
     assert.equal(JSON.stringify(result).includes('private-test-token'), false);
-    globalThis.sessionStorage.getItem = () => 'invalid-json';
-    const missing = await probeAuthenticatedApi(manifest.frontend.api_url);
+    const missing = await probeAuthenticatedApi({
+      api: manifest.frontend.api_url,
+    });
     assert.equal(missing.tokenPresent, false);
   } finally {
     globalThis.fetch = savedFetch;
-    if (savedStorage)
-      Object.defineProperty(globalThis, 'sessionStorage', savedStorage);
-    else delete globalThis.sessionStorage;
   }
 });

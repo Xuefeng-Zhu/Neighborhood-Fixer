@@ -5,6 +5,49 @@ import os
 
 @dataclass
 class Settings:
+    auth_provider: str = field(
+        default_factory=lambda: os.getenv("NF_AUTH_PROVIDER", "clerk")
+    )
+    clerk_issuer: str = field(default_factory=lambda: os.getenv("NF_CLERK_ISSUER", ""))
+    auth_audience: str = field(
+        default_factory=lambda: os.getenv("NF_AUTH_AUDIENCE", "neighborhood-fixer-api")
+    )
+    authorized_parties: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            filter(
+                None,
+                os.getenv(
+                    "NF_AUTHORIZED_PARTIES", os.getenv("NF_ALLOWED_ORIGINS", "")
+                ).split(","),
+            )
+        )
+    )
+    shared_workspace_id: str = field(
+        default_factory=lambda: os.getenv("NF_SHARED_WORKSPACE_ID", "demo-borough-v1")
+    )
+    data_generation: str = field(
+        default_factory=lambda: os.getenv("NF_DATA_GENERATION", "clerk-v1")
+    )
+    reports_per_day: int = field(
+        default_factory=lambda: int(os.getenv("NF_REPORTS_PER_DAY", "10"))
+    )
+    uploads_per_day: int = field(
+        default_factory=lambda: int(os.getenv("NF_UPLOADS_PER_DAY", "25"))
+    )
+    reasoning_jobs_per_day: int = field(
+        default_factory=lambda: int(os.getenv("NF_REASONING_JOBS_PER_DAY", "30"))
+    )
+    workspace_reports_per_day: int = field(
+        default_factory=lambda: int(os.getenv("NF_WORKSPACE_REPORTS_PER_DAY", "100"))
+    )
+    workspace_uploads_per_day: int = field(
+        default_factory=lambda: int(os.getenv("NF_WORKSPACE_UPLOADS_PER_DAY", "250"))
+    )
+    workspace_reasoning_jobs_per_day: int = field(
+        default_factory=lambda: int(
+            os.getenv("NF_WORKSPACE_REASONING_JOBS_PER_DAY", "300")
+        )
+    )
     mode: str = field(default_factory=lambda: os.getenv("NF_MODE", "local"))
     environment: str = field(
         default_factory=lambda: os.getenv("NF_ENVIRONMENT", "development")
@@ -44,6 +87,36 @@ class Settings:
     )
 
     def __post_init__(self):
+        import re
+
+        if self.auth_provider != "clerk":
+            raise ValueError("NF_AUTH_PROVIDER must be clerk")
+        if (
+            any(
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value)
+                for value in (self.shared_workspace_id, self.data_generation)
+            )
+            or self.shared_workspace_id == "auth"
+        ):
+            raise ValueError("Invalid shared workspace or data generation")
+        if any(
+            not 1 <= value <= 1000
+            for value in (
+                self.reports_per_day,
+                self.uploads_per_day,
+                self.reasoning_jobs_per_day,
+            )
+        ):
+            raise ValueError("Daily limits must be finite positive values")
+        if any(
+            not 1 <= value <= 10000
+            for value in (
+                self.workspace_reports_per_day,
+                self.workspace_uploads_per_day,
+                self.workspace_reasoning_jobs_per_day,
+            )
+        ):
+            raise ValueError("Workspace daily limits must be finite positive values")
         if self.mode not in ("local", "aws"):
             raise ValueError(
                 "NF_MODE must be local or aws; unknown modes never fall back to fixtures"
