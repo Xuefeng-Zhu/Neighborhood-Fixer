@@ -1,0 +1,24 @@
+{
+  "name": "neighborhood-fixer",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "python3 scripts/dev.py",
+    "dev:web": "npm run dev --workspace apps/web",
+    "build": "npm run build --workspace apps/web",
+    "typecheck": "npm run typecheck --workspace apps/web",
+    "test:web": "npm run test --workspace apps/web",
+    "test:e2e": "playwright test --config apps/web/playwright.config.ts",
+    "generate:api": "openapi-typescript packages/contracts/openapi.json -o apps/web/src/lib/generated-api.ts",
+    "format": "prettier --write \"apps/web/src/**/*.{ts,tsx,css}\" \"apps/web/*.{ts,json,html}\" \"apps/web/tests/**/*.ts\" \"infra/cdk/**/*.{ts,json}\" \"*.json\""
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "jsdom": "26.1.0",
+    "openapi-typescript": "7.13.0",
+    "prettier": "3.9.6"
+  }
+}

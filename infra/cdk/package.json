@@ -1,0 +1,20 @@
+{
+  "name": "neighborhood-fixer-infra",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "synth": "cdk synth",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.269.0",
+    "constructs": "10.8.1"
+  },
+  "devDependencies": {
+    "aws-cdk": "2.1141.0",
+    "typescript": "5.9.3",
+    "tsx": "4.20.6",
+    "@types/node": "24.10.1"
+  }
+}

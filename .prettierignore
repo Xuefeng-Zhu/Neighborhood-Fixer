@@ -1,0 +1,9 @@
+node_modules
+dist
+cdk.out
+package-lock.json
+uv.lock
+apps/web/src/lib/generated-api.ts
+packages/contracts/openapi.json
+docs/verification
+fixtures/images

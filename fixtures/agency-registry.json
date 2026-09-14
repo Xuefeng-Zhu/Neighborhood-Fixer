@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "agencies": [{
+    "id": "demo-borough",
+    "name": "Demo Borough Public Works",
+    "fictional": true,
+    "coverage": {"bbox": [-122.35,47.60,-122.32,47.63], "description":"Fictional demo boundary only; these coordinates do not establish any real jurisdiction"},
+    "supported_categories": ["damaged_sidewalk","pothole","walkway_obstruction"],
+    "asset_conditions": ["Resident confirms a public street or walkway; this demo has no authoritative asset ownership service"],
+    "required_fields": ["description","category","confirmed_location"],
+    "capabilities": {"submission":"browser","status":"receipt_lookup","attachments":true,"idempotency":"unique demo attempt identifier"},
+    "destination_configuration": "NF_PORTAL_URL (trusted server environment; no model override)",
+    "automation_authorized": true,
+    "automation_scope": "Only the fictional portal configured by the deployment owner",
+    "real_municipal_submission_enabled": false,
+    "reviewed_at": "2026-09-13",
+    "sources": [{"title":"Fictional registry configuration v1","url":"/api/registry/demo-borough","kind":"fictional_configuration","excerpt":"This demonstration accepts public walkway damage, potholes and obstructions. No real city department or policy is represented."}]
+  }]
+}

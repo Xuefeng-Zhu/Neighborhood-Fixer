@@ -1,0 +1,6 @@
+{
+  "app": "node --import tsx app.ts",
+  "context": {
+    "@aws-cdk/core:checkSecretUsage": true
+  }
+}

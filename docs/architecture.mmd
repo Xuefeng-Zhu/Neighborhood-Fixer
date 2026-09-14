@@ -1,0 +1,58 @@
+flowchart TB
+    Resident[Resident confirms photo and location] --> Web[React Vite application]
+    Neighbor[Second resident observation] --> Web
+    Web -->|authenticated commands / operation polling| API[FastAPI domain commands]
+    API --> Observation[Original observations preserved]
+    Observation --> Canonical[One canonical incident]
+    Canonical --> Draft[Immutable report revision]
+    Draft --> Approval[Resident approval bound to payload and attachment hashes]
+    Approval --> Reserve[Atomic submission reservation]
+    Reserve --> Browser[Deterministic allowlisted browser executor]
+    Browser --> Portal[Fictional agency portal]
+    Portal --> Ticket[Private receipt and raw agency status]
+    Ticket --> Check[Bounded status reads]
+    Check --> Verify[Optional resident verification]
+    Verify --> Followers[Shared case outcome and notifications]
+    Check -->|agency closure| Unverified[Physical resolution remains separate]
+    Browser -->|possible write without receipt| Unknown[OUTCOME_UNKNOWN]
+    Unknown -->|receipt lookup only| Ticket
+    API --> Analyst[Issue Analyst: evidence and nearby tools]
+    API --> Router[Routing Specialist: registry and ownership tools]
+    API --> Coordinator[Case Coordinator: prepare and bounded next actions]
+    subgraph Local[Local fixture mode]
+      SQLite[(SQLite records + jobs)]
+      Files[Private local evidence]
+      Worker[Restartable leased worker + virtual clock]
+      Fixtures[Deterministic model fixtures]
+      Playwright[Local Chromium]
+    end
+    subgraph AWS[AWS demo configuration - deployment separately verified]
+      Cognito[Cognito JWT authorization]
+      Lambda[API Gateway + Lambda]
+      Runtime[AgentCore Runtime + Strands + Bedrock]
+      Durable[Step Functions Standard + server-side callbacks]
+      Dynamo[(DynamoDB conditional transactions)]
+      S3[Private encrypted S3]
+      CloudBrowser[AgentCore Browser]
+      Hosting[Amplify Hosting]
+      Map[Amazon Location]
+      Logs[Sanitized CloudWatch / OpenTelemetry]
+    end
+    API --> SQLite
+    API --> Lambda
+    Worker --> SQLite
+    API --> Files
+    Analyst --> Fixtures
+    Browser --> Playwright
+    Lambda --> Cognito
+    Lambda --> Dynamo
+    Lambda --> S3
+    Lambda --> Durable
+    Durable --> Runtime
+    Runtime --> Analyst
+    Runtime --> Router
+    Runtime --> Coordinator
+    Browser --> CloudBrowser
+    Hosting --> Web
+    Web --> Map
+    Runtime --> Logs

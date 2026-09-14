@@ -1,0 +1,23 @@
+[project]
+name = "neighborhood-fixer"
+version = "0.1.0"
+description = "Persisted, consent-driven neighborhood case management"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "fastapi==0.141.1", "pydantic==2.13.5", "uvicorn==0.52.4",
+  "python-multipart==0.0.32", "pillow==12.3.0", "httpx==0.28.1",
+  "itsdangerous==2.2.0", "playwright==1.62.0", "mangum==0.22.0"
+]
+[project.optional-dependencies]
+aws = ["strands-agents==1.55.1", "bedrock-agentcore==1.23.0", "boto3==1.43.93"]
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.7",
+]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+[tool.uv]
+package = false
