@@ -28,14 +28,33 @@ test('private retained storage and real agent resources', () => {
     NetworkConfiguration: { NetworkMode: 'PUBLIC' },
   });
 });
-test('durable standard callback workflow has no automatic submit retry', () => {
+test('durable workflow retries only concurrent workspace updates before review', () => {
   template.hasResourceProperties('AWS::StepFunctions::StateMachine', {
     StateMachineType: 'STANDARD',
     LoggingConfiguration: Match.objectLike({ IncludeExecutionData: false }),
   });
-  const data = JSON.stringify(
-    template.findResources('AWS::StepFunctions::StateMachine'),
-  );
+  const machines = template.findResources('AWS::StepFunctions::StateMachine');
+  const machine = Object.values(machines)[0] as any;
+  const definition = machine.Properties.DefinitionString['Fn::Join'][1]
+    .map((part: unknown) => (typeof part === 'string' ? part : '__TOKEN__'))
+    .join('');
+  const states = JSON.parse(definition).States;
+  assert.deepEqual(states.RunDomainCommand.Retry, [
+    {
+      ErrorEquals: ['ConcurrentUpdate'],
+      IntervalSeconds: 1,
+      MaxAttempts: 3,
+      BackoffRate: 2,
+    },
+  ]);
+  assert.deepEqual(states.RunDomainCommand.Catch, [
+    {
+      ErrorEquals: ['States.ALL'],
+      ResultPath: null,
+      Next: 'NeedsReview',
+    },
+  ]);
+  const data = JSON.stringify(machines);
   assert.match(data, /waitForTaskToken/);
   assert.match(data, /WaitForStatusDue/);
   assert.doesNotMatch(data, /Lambda\.ServiceException/);

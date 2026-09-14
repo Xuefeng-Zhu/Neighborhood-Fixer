@@ -30,6 +30,7 @@ import { AnalysisView } from './Report';
 import { useSession } from '../lib/session';
 export function CaseDetail() {
   const { request, post } = useApi();
+  const { session } = useSession();
   const { id } = useParams();
   const [search] = useSearchParams();
   const client = useQueryClient();
@@ -282,8 +283,9 @@ export function CaseDetail() {
               <ChevronDown size={18} />
             </summary>
             <p className="small muted">
-              Recorded tool outcomes and decision summaries. Local analysis is
-              deterministic and simulated.
+              Recorded tool outcomes and decision summaries.
+              {session.mode === 'local' &&
+                ' Local analysis is deterministic and simulated.'}
             </p>
             {incident.agent_activity?.length ? (
               incident.agent_activity.map((activity, index) => (
@@ -318,6 +320,12 @@ export function CaseDetail() {
                   ) : null}
                 </article>
               ))
+            ) : incident.is_sample ? (
+              <p>
+                This illustrative sample did not run an agent.{' '}
+                <Link to="/report">Report your own observation</Link> to see
+                recorded agent activity.
+              </p>
             ) : (
               <p>No tool activity recorded yet.</p>
             )}
