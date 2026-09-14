@@ -14,7 +14,7 @@ A broken curb ramp can interrupt a trip to the bus stop, school, or grocery stor
 
 ## How it is built
 
-A React/TypeScript application uses a shared FastAPI domain layer with explicit observations, incidents, immutable submission revisions, approvals, attempts, tickets and append-only case events. Local mode uses persisted SQLite jobs and an actual browser-driven fictional portal. Three restricted Strands agents use Amazon Bedrock for real analysis, routing and coordination. The AWS configuration includes AgentCore Runtime and Browser, Step Functions Standard, DynamoDB, private S3, Amplify Hosting and Amazon Location. Clerk provides session-bound sign-in; a server-selected shared Demo Borough uses daily quotas and generation-fenced admission. Consult the current test report for live acceptance; prior identity-provider tests do not establish this migration.
+A React/TypeScript application uses a shared FastAPI domain layer with explicit observations, incidents, immutable submission revisions, approvals, attempts, tickets and append-only case events. Local mode uses persisted SQLite jobs and an actual browser-driven fictional portal. Three restricted Strands agents use Amazon Bedrock for real analysis, routing and coordination. The AWS deployment includes AgentCore Runtime and Browser, Step Functions Standard, DynamoDB, private S3, Amplify Hosting and Amazon Location. Clerk provides session-bound public signup with exact API claims; a server-selected shared Demo Borough uses daily quotas and generation-fenced admission. Live acceptance verified signup, maps, privacy, quotas, two residents' photo-to-shared-draft journey, and a clean public one-sample reset. CloudFormation contains zero Cognito resources. The journey stopped before approval because AgentCore Browser navigation remains blocked; see the current test report.
 
 ## What the demonstration establishes
 
@@ -30,10 +30,10 @@ Authorized deployment and model evaluation; accessibility testing with residents
 
 ## Participant completion fields
 
-- Public repository URL: not published by this build.
+- Repository URL: `https://github.com/Xuefeng-Zhu/Neighborhood-Fixer` (currently private; change visibility only after a separate publication review).
 - Public YouTube/Vimeo demo video: not recorded or uploaded by this build.
 - AWS Builder ID: participant supplies through Devpost.
-- Live demo URL: not deployed by this build.
+- Live demo URL: `https://main.d12il66dljooo6.amplifyapp.com/`.
 - Architecture: `docs/architecture.mmd`.
 - Actual validation: `docs/TEST-REPORT.md`.
 - License: MIT.

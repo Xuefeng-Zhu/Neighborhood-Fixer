@@ -22,7 +22,6 @@ if (bucketName && repositoryName) {
 }
 new NeighborhoodFixerStack(app, 'NeighborhoodFixer', {
   env,
-  retainLegacyCognito: app.node.tryGetContext('retainLegacyCognito') === 'true',
   synthesizer:
     bucketName && repositoryName
       ? new cdk.CliCredentialsStackSynthesizer({

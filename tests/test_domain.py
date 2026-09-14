@@ -756,6 +756,32 @@ def test_model_cannot_override_trusted_routing_or_required_clarification(
     )
 
 
+def test_model_only_question_cannot_block_complete_resident_input(system, monkeypatch):
+    domain, _, p = system
+
+    class ExtraQuestionModel:
+        def analyze(self, *args):
+            return {
+                "observed_facts": ["A broken pavement edge is visible."],
+                "resident_claims": ["The resident described the same nearby defect."],
+                "unknowns": ["Exact dimensions remain unknown."],
+                "candidate_category": "damaged_sidewalk",
+                "missing_information": [
+                    "Confirm whether this is the same defect as the nearby candidate."
+                ],
+                "provenance": "test model",
+            }
+
+    obs = domain.create_observation(p, observation())
+    switch_fixture_to_cloud(domain, p)
+    monkeypatch.setattr(domain, "engine", lambda: ExtraQuestionModel())
+    result = run(domain, p, domain.start_analysis(p, obs["id"]))
+    analysis = result["result"]["analysis"]
+    assert analysis["missing_information"] == []
+    assert "same defect" in analysis["unknowns"][-1]
+    assert domain.decide(p, obs["id"], None, True)
+
+
 def test_unknown_mode_does_not_fall_back_to_fixture(tmp_path):
     with pytest.raises(ValueError, match="never fall back"):
         Settings(mode="unrecognized", data_dir=tmp_path)

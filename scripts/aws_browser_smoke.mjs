@@ -383,8 +383,9 @@ export async function runSmoke(env = process.env) {
       .first()
       .fill(c.username);
     const password = page.locator('input[type="password"]:visible').first();
-    if (!(await password.isVisible()))
-      await page.getByRole('button', { name: /^Continue$/i }).click();
+    // Clerk can render the password field on the identifier screen while still
+    // requiring the identifier to be continued before it accepts the password.
+    await page.getByRole('button', { name: /^Continue$/i }).click();
     await password.waitFor({ state: 'visible' });
     verify([c.web, c.clerk].includes(new URL(page.url()).origin));
     await password.fill(c.password);

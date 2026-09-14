@@ -33,6 +33,24 @@ def digest(value):
     ).hexdigest()
 
 
+def validate_manifest(plan, expected_digest):
+    """Validate the reviewed reset document before any destructive operation."""
+    if (
+        not isinstance(plan, dict)
+        or digest(plan) != expected_digest
+        or plan.get("kind") != "neighborhood_fixer_reset"
+        or plan.get("schema_version") != 1
+        or not isinstance(plan.get("target"), dict)
+        or not isinstance(plan.get("inventory"), dict)
+        or set(plan["inventory"]) != {"records", "portal", "versions", "multipart"}
+        or any(not isinstance(items, list) for items in plan["inventory"].values())
+        or not isinstance(plan.get("allowed_subjects"), list)
+        or any(not isinstance(subject, str) for subject in plan["allowed_subjects"])
+    ):
+        raise UnsafeReset("Reset manifest integrity check failed.")
+    return plan
+
+
 def bounded(items):
     if len(items) > MAX_ITEMS:
         raise UnsafeReset(
@@ -156,11 +174,11 @@ def resolve_target(clients, account, region, stack_name):
         cursor = page.get("NextToken")
         if not cursor:
             break
-    resources = {
-        row["PhysicalResourceId"]: row["ResourceType"]
-        for row in rows
-        if row.get("PhysicalResourceId")
-    }
+    resources = {}
+    for row in rows:
+        physical_id = row.get("PhysicalResourceId")
+        if physical_id:
+            resources.setdefault(physical_id, set()).add(row["ResourceType"])
     outputs = {row["OutputKey"]: row["OutputValue"] for row in stack.get("Outputs", [])}
     for key, kind in {
         "RecordsTable": "AWS::DynamoDB::Table",
@@ -169,7 +187,7 @@ def resolve_target(clients, account, region, stack_name):
         "WorkflowArn": "AWS::StepFunctions::StateMachine",
         "BrowserId": "AWS::BedrockAgentCore::BrowserCustom",
     }.items():
-        if resources.get(outputs.get(key)) != kind:
+        if kind not in resources.get(outputs.get(key), set()):
             raise UnsafeReset(
                 "A data output does not identify a resource owned by this stack."
             )
@@ -266,41 +284,147 @@ def verify_seeded(clients, target):
         raise UnsafeReset(
             "The fresh sample must not leave portal records or uploaded evidence."
         )
-    kinds = {}
-    for key in state["records"]:
-        kind = key["sk"]["S"].split("#", 1)[0]
-        kinds.setdefault(kind, []).append(key)
-    if any(
-        kinds.get(kind)
-        for kind in ["job", "operation", "ticket", "approval", "attempt", "callback"]
-    ):
-        raise UnsafeReset(
-            "Operational records remain after reset; public admission is refused."
-        )
-    for kind in ["incident", "observation"]:
-        if len(kinds.get(kind, [])) != 1:
+    records = state["records"]
+    workspace = target.outputs["SharedWorkspaceId"]
+    workspace_pk = "W#" + workspace
+    sks = [key.get("sk", {}).get("S") for key in records]
+
+    def one(prefix):
+        matches = [
+            key for key in records if key.get("sk", {}).get("S", "").startswith(prefix)
+        ]
+        if len(matches) != 1:
             raise UnsafeReset(
-                "Reset must leave exactly one sample incident and one sample observation."
+                "Reset must leave exactly the records created by the inert sample."
             )
-        item = (
+        return matches[0]
+
+    def raw_item(key):
+        return (
             clients["dynamodb"]
             .get_item(
                 TableName=target.outputs["RecordsTable"],
-                Key=kinds[kind][0],
+                Key=key,
                 ConsistentRead=True,
             )
             .get("Item")
         )
-        data = json.loads(item["data"]["S"]) if item else {}
-        if (
-            data.get("is_sample") is not True
-            or data.get("workspace_id") != target.outputs["SharedWorkspaceId"]
-            or data.get("ticket")
-            or data.get("attempt_id")
-        ):
-            raise UnsafeReset(
-                "The retained case must be a non-actionable sample without a receipt or approval."
-            )
+
+    def item_data(key):
+        value = (raw_item(key) or {}).get("data", {}).get("S")
+        try:
+            data = json.loads(value) if isinstance(value, str) else None
+        except (TypeError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            raise UnsafeReset("An inert sample record is malformed.")
+        return data
+
+    def record_key(sk):
+        return {"pk": {"S": workspace_pk}, "sk": {"S": sk}}
+
+    incident_key = one("incident#")
+    observation_key = one("observation#")
+    event_key = one("event#")
+    incident_data = item_data(incident_key)
+    observation_data = item_data(observation_key)
+    incident_id = incident_data.get("id")
+    observation_id = observation_data.get("id")
+    event_id = event_key["sk"]["S"].split("#", 1)[1]
+    cell = incident_data.get("cell")
+    if (
+        not isinstance(incident_id, str)
+        or not isinstance(observation_id, str)
+        or not isinstance(cell, list)
+        or len(cell) != 2
+    ):
+        raise UnsafeReset("The inert sample index is malformed.")
+    expected_sks = {
+        "!revision",
+        "workspace#" + workspace,
+        "incident#" + incident_id,
+        "observation#" + observation_id,
+        "event#" + event_id,
+        "event:" + incident_id + "#" + event_id,
+        "event_head#" + incident_id,
+        "geo:" + ":".join(map(str, cell)) + "#" + incident_id,
+    }
+    if (
+        len(records) != len(expected_sks)
+        or set(sks) != expected_sks
+        or any(key.get("pk", {}).get("S") != workspace_pk for key in records)
+    ):
+        raise UnsafeReset(
+            "Unexpected records remain after reset; public admission is refused."
+        )
+    event_data = item_data(event_key)
+    event_alias_data = item_data(record_key("event:" + incident_id + "#" + event_id))
+    event_head_data = item_data(record_key("event_head#" + incident_id))
+    geo_data = item_data(
+        record_key("geo:" + ":".join(map(str, cell)) + "#" + incident_id)
+    )
+    revision_item = raw_item(record_key("!revision"))
+    revision = (revision_item or {}).get("revision", {}).get("N")
+    event_fields = {
+        "id",
+        "workspace_id",
+        "incident_id",
+        "type",
+        "message",
+        "operation_id",
+        "created_at",
+    }
+    if (
+        incident_data.get("is_sample") is not True
+        or incident_data.get("seeded") is not True
+        or incident_data.get("workspace_id") != workspace
+        or incident_data.get("observation_ids") != [observation_id]
+        or incident_data.get("observation_count") != 1
+        or incident_data.get("owner_id") != "fixture"
+        or incident_data.get("agency_status") != "NOT_SUBMITTED"
+        or incident_data.get("submission_status") != "PREPARED"
+        or incident_data.get("resolution_status") != "UNVERIFIED"
+        or "ticket" in incident_data
+        or "attempt_id" in incident_data
+        or observation_data.get("is_sample") is not True
+        or observation_data.get("workspace_id") != workspace
+        or observation_data.get("incident_id") != incident_id
+        or observation_data.get("owner_id") != "fixture"
+        or observation_data.get("evidence_ids") != []
+        or observation_data.get("analysis") is not None
+        or observation_data.get("share_evidence") is not False
+        or set(event_data) != event_fields
+        or event_data.get("id") != event_id
+        or event_data.get("workspace_id") != workspace
+        or event_data.get("incident_id") != incident_id
+        or event_data.get("type") != "ILLUSTRATION"
+        or event_data.get("message")
+        != "Illustrative fixture created; no report has been sent."
+        or not isinstance(event_data.get("operation_id"), str)
+        or not event_data["operation_id"]
+        or not isinstance(event_data.get("created_at"), str)
+        or not event_data["created_at"]
+        or event_alias_data != event_data
+        or event_head_data
+        != {
+            "id": incident_id,
+            "workspace_id": workspace,
+            "event_ids": [event_id],
+        }
+        or geo_data
+        != {
+            "id": incident_id,
+            "workspace_id": workspace,
+            "incident_id": incident_id,
+        }
+        or not revision_item
+        or set(revision_item) != {"pk", "sk", "revision"}
+        or not isinstance(revision, str)
+        or not re.fullmatch(r"[1-9]\d*", revision)
+    ):
+        raise UnsafeReset(
+            "The retained case must be a non-actionable sample without evidence, receipt or approval."
+        )
     return {
         "generation_matches": True,
         "admission": "validation",
@@ -330,9 +454,6 @@ def make_plan(clients, target, generation, next_generation, subjects, now=None):
             "Stop the stack's running workflows and browser sessions before planning a reset."
         )
     now = int(time.time() if now is None else now)
-    legacy = target.outputs.get("LegacyUserPoolId")
-    if legacy and target.resources.get(legacy) != "AWS::Cognito::UserPool":
-        raise UnsafeReset("Legacy pool output does not belong to the selected stack.")
     return {
         "schema_version": 1,
         "kind": "neighborhood_fixer_reset",
@@ -343,7 +464,6 @@ def make_plan(clients, target, generation, next_generation, subjects, now=None):
         "created_at": now,
         "not_before": now + DRAIN_SECONDS,
         "expires_at": now + MAX_PLAN_AGE,
-        "legacy_user_pool_id": legacy,
         "inventory": inventory(clients, target),
     }
 
@@ -367,12 +487,7 @@ def delete_table_keys(client, table, keys, sleep=time.sleep):
 def apply_reset(
     clients, target, plan, expected_digest, now=None, seed=None, resume=False
 ):
-    if (
-        digest(plan) != expected_digest
-        or plan.get("kind") != "neighborhood_fixer_reset"
-        or plan.get("schema_version") != 1
-    ):
-        raise UnsafeReset("Reset manifest integrity check failed.")
+    validate_manifest(plan, expected_digest)
     if (
         target.binding() != plan["target"]
         or target.outputs["DataGeneration"] != plan["next_generation"]
@@ -488,7 +603,6 @@ def main(argv=None):
             "plan-reset",
             "apply-reset",
             "verify-reset",
-            "delete-legacy-cognito",
         ],
     )
     parser.add_argument("--expected-account", required=True)
@@ -536,7 +650,6 @@ def main(argv=None):
                 "s3",
                 "stepfunctions",
                 "bedrock-agentcore",
-                "cognito-idp",
             ]
         }
         target = resolve_target(
@@ -560,16 +673,15 @@ def main(argv=None):
                 counts={k: len(v) for k, v in plan["inventory"].items()},
                 drain_seconds=DRAIN_SECONDS,
             )
-        elif args.command in ("apply-reset", "delete-legacy-cognito"):
+        elif args.command == "apply-reset":
             if not args.manifest or not args.manifest_sha256:
                 raise UnsafeReset(
                     "The reviewed private manifest and SHA256 are required."
                 )
             plan = json.loads(private_path(args.manifest, True).read_text())
-            if (
-                digest(plan) != args.manifest_sha256
-                or plan.get("target") != target.binding()
-                or args.generation != plan.get("next_generation")
+            validate_manifest(plan, args.manifest_sha256)
+            if plan.get("target") != target.binding() or args.generation != plan.get(
+                "next_generation"
             ):
                 raise UnsafeReset(
                     "The manifest does not match this target and generation."
@@ -578,32 +690,12 @@ def main(argv=None):
                 raise UnsafeReset(
                     "Complete Clerk validation and explicitly attest --validated-clerk before deletion."
                 )
-            if args.command == "apply-reset":
-                if args.apply:
-                    result = apply_reset(
-                        clients, target, plan, args.manifest_sha256, resume=args.resume
-                    )
-                else:
-                    result.update(
-                        counts={k: len(v) for k, v in plan["inventory"].items()}
-                    )
+            if args.apply:
+                result = apply_reset(
+                    clients, target, plan, args.manifest_sha256, resume=args.resume
+                )
             else:
-                pool = plan.get("legacy_user_pool_id")
-                if not pool or not pool.startswith(args.region + "_"):
-                    raise UnsafeReset(
-                        "The manifest has no region-matching legacy pool."
-                    )
-                if pool in target.resources:
-                    raise UnsafeReset(
-                        "Remove legacy Cognito constructs in the final deployment before deleting the retained pool."
-                    )
-                current = control(clients, target)
-                if not current or current.get("generation") != args.generation:
-                    raise UnsafeReset("The fresh Clerk workspace is not initialized.")
-                clients["cognito-idp"].describe_user_pool(UserPoolId=pool)
-                if args.apply:
-                    clients["cognito-idp"].delete_user_pool(UserPoolId=pool)
-                    result["applied"] = True
+                result.update(counts={k: len(v) for k, v in plan["inventory"].items()})
         else:
             if target.outputs["DataGeneration"] != args.generation:
                 raise UnsafeReset("The generation does not match the deployed stack.")

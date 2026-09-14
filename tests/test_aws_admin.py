@@ -17,12 +17,16 @@ from scripts.manage_aws_demo import (
     private_path,
     resolve_target,
     table_keys,
+    validate_manifest,
     verify_seeded,
 )
 
 
 def key(kind, value):
-    return {"pk": {"S": "W#demo"}, "sk": {"S": kind + "#" + value}}
+    return {
+        "pk": {"S": "W#demo"},
+        "sk": {"S": "!revision" if kind == "!revision" else kind + "#" + value},
+    }
 
 
 class DDB:
@@ -33,7 +37,15 @@ class DDB:
 
     def put(self, table, kind, value, data):
         k = key(kind, value)
+        self.put_key(table, k, data)
+
+    def put_key(self, table, key_value, data):
+        k = deepcopy(key_value)
         self.data[table][digest(k)] = {**k, "data": {"S": json.dumps(data)}}
+
+    def put_raw(self, table, key_value, values):
+        k = deepcopy(key_value)
+        self.data[table][digest(k)] = {**k, **deepcopy(values)}
 
     def get_item(self, TableName, Key, **kwargs):
         assert kwargs["ConsistentRead"] is True
@@ -160,7 +172,6 @@ def cloud():
         "WebUrl": "https://main.example.amplifyapp.com",
         "WorkflowArn": "workflow",
         "BrowserId": "browser",
-        "LegacyUserPoolId": "us-west-2_legacy",
     }
     resources = {
         "records": "AWS::DynamoDB::Table",
@@ -168,7 +179,6 @@ def cloud():
         "evidence": "AWS::S3::Bucket",
         "workflow": "AWS::StepFunctions::StateMachine",
         "browser": "AWS::BedrockAgentCore::BrowserCustom",
-        "us-west-2_legacy": "AWS::Cognito::UserPool",
     }
     target = Target(
         "111122223333",
@@ -197,16 +207,77 @@ def cloud():
     }
 
     def seed():
+        ddb.put_raw("records", key("!revision", ""), {"revision": {"N": "1"}})
         ddb.put(
             "records",
             "workspace",
             "demo",
             {"generation": "g1", "admission": "validation"},
         )
-        for kind in ["incident", "observation"]:
-            ddb.put(
-                "records", kind, "sample", {"is_sample": True, "workspace_id": "demo"}
-            )
+        ddb.put(
+            "records",
+            "incident",
+            "sample",
+            {
+                "id": "sample",
+                "is_sample": True,
+                "workspace_id": "demo",
+                "observation_ids": ["sample-observation"],
+                "observation_count": 1,
+                "owner_id": "fixture",
+                "agency_status": "NOT_SUBMITTED",
+                "submission_status": "PREPARED",
+                "resolution_status": "UNVERIFIED",
+                "seeded": True,
+                "cell": [1, 2],
+            },
+        )
+        ddb.put(
+            "records",
+            "observation",
+            "sample-observation",
+            {
+                "id": "sample-observation",
+                "incident_id": "sample",
+                "evidence_ids": [],
+                "is_sample": True,
+                "workspace_id": "demo",
+                "owner_id": "fixture",
+                "analysis": None,
+                "share_evidence": False,
+            },
+        )
+        event = {
+            "id": "sample-event",
+            "workspace_id": "demo",
+            "incident_id": "sample",
+            "type": "ILLUSTRATION",
+            "message": "Illustrative fixture created; no report has been sent.",
+            "operation_id": "sample-operation",
+            "created_at": "2026-09-14T00:00:00Z",
+        }
+        ddb.put("records", "event", "sample-event", event)
+        ddb.put("records", "event:sample", "sample-event", event)
+        ddb.put(
+            "records",
+            "event_head",
+            "sample",
+            {
+                "id": "sample",
+                "workspace_id": "demo",
+                "event_ids": ["sample-event"],
+            },
+        )
+        ddb.put(
+            "records",
+            "geo:1:2",
+            "sample",
+            {
+                "id": "sample",
+                "workspace_id": "demo",
+                "incident_id": "sample",
+            },
+        )
 
     return target, clients, seed
 
@@ -280,12 +351,33 @@ def test_full_reset_verifies_fresh_seed_and_no_operational_records(cloud):
     )
 
 
+@pytest.mark.parametrize("field,value", [("kind", "other"), ("schema_version", 2)])
+def test_recomputed_digest_cannot_bypass_manifest_structure(cloud, field, value):
+    target, clients, _ = cloud
+    plan = make_plan(clients, target, "g0", "g1", ["user_test"], now=1000)
+    plan[field] = value
+    with pytest.raises(UnsafeReset, match="integrity"):
+        validate_manifest(plan, digest(plan))
+
+
 @pytest.mark.parametrize(
     "corruption",
     [
         "job",
         "approval",
         "ticket",
+        "user",
+        "quota",
+        "evidence",
+        "draft",
+        "auth_revision",
+        "event_payload",
+        "timeline_payload",
+        "event_head_payload",
+        "geo_payload",
+        "revision_payload",
+        "empty_ticket",
+        "null_attempt",
         "extra_incident",
         "generation",
         "not_sample",
@@ -300,8 +392,54 @@ def test_post_reset_verification_fails_closed_for_each_corrupted_seed(
     clients["s3"].versions = []
     clients["s3"].uploads = []
     seed()
-    if corruption in ("job", "approval", "ticket"):
+    if corruption in (
+        "job",
+        "approval",
+        "ticket",
+        "user",
+        "quota",
+        "evidence",
+        "draft",
+    ):
         clients["dynamodb"].put("records", corruption, "unexpected", {})
+    elif corruption == "auth_revision":
+        clients["dynamodb"].put_key(
+            "records",
+            {"pk": {"S": "W#auth"}, "sk": {"S": "!revision"}},
+            {"revision": 1},
+        )
+    elif corruption in (
+        "event_payload",
+        "timeline_payload",
+        "event_head_payload",
+        "geo_payload",
+        "empty_ticket",
+        "null_attempt",
+    ):
+        corrupted_keys = {
+            "event_payload": key("event", "sample-event"),
+            "timeline_payload": key("event:sample", "sample-event"),
+            "event_head_payload": key("event_head", "sample"),
+            "geo_payload": key("geo:1:2", "sample"),
+            "empty_ticket": key("incident", "sample"),
+            "null_attempt": key("incident", "sample"),
+        }
+        record = clients["dynamodb"].data["records"][digest(corrupted_keys[corruption])]
+        data = json.loads(record["data"]["S"])
+        field, value = {
+            "event_payload": ("type", "SUBMITTED"),
+            "timeline_payload": ("message", "operational text"),
+            "event_head_payload": ("event_ids", ["other-event"]),
+            "geo_payload": ("incident_id", "other-incident"),
+            "empty_ticket": ("ticket", {}),
+            "null_attempt": ("attempt_id", None),
+        }[corruption]
+        data[field] = value
+        record["data"]["S"] = json.dumps(data)
+    elif corruption == "revision_payload":
+        clients["dynamodb"].put_raw(
+            "records", key("!revision", ""), {"revision": {"N": "0"}}
+        )
     elif corruption == "extra_incident":
         clients["dynamodb"].put("records", "incident", "extra", {"is_sample": True})
     elif corruption == "not_sample":
@@ -382,14 +520,21 @@ def test_account_and_stack_ownership_checks_before_any_data_access(cloud):
             {"OutputKey": k, "OutputValue": v} for k, v in target.outputs.items()
         ],
     }
+    summaries = [
+        {"PhysicalResourceId": k, "ResourceType": v}
+        for k, v in target.resources.items()
+    ]
+    # CloudFormation reports the bucket policy with the bucket's physical ID too.
+    # A later duplicate must not hide the bucket resource from the ownership check.
+    summaries.append(
+        {
+            "PhysicalResourceId": target.outputs["EvidenceBucket"],
+            "ResourceType": "AWS::S3::BucketPolicy",
+        }
+    )
     clients["cloudformation"] = SimpleNamespace(
         describe_stacks=lambda **kw: {"Stacks": [stack]},
-        list_stack_resources=lambda **kw: {
-            "StackResourceSummaries": [
-                {"PhysicalResourceId": k, "ResourceType": v}
-                for k, v in target.resources.items()
-            ]
-        },
+        list_stack_resources=lambda **kw: {"StackResourceSummaries": summaries},
     )
     assert (
         resolve_target(

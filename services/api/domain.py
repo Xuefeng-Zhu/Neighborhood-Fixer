@@ -1326,9 +1326,19 @@ class Domain(Policy):
             required = fixtures.analyze(obs, evidence, candidates, p)[
                 "missing_information"
             ]
-            analysis["missing_information"] = list(
-                dict.fromkeys(analysis["missing_information"] + required)
+            # The service owns the complete list of resident facts required to
+            # proceed. Model-suggested questions can preserve uncertainty, but
+            # cannot create an extra blocking gate (for example, asking the
+            # resident to confirm a duplicate before the duplicate decision UI).
+            model_only_questions = [
+                question
+                for question in analysis["missing_information"]
+                if question not in required
+            ]
+            analysis["unknowns"] = list(
+                dict.fromkeys(analysis["unknowns"] + model_only_questions)
             )
+            analysis["missing_information"] = required
             with self.job_transaction(workspace_id, job) as tx:
                 current = self.require(tx, "observation", obs["id"])
                 if current["version"] != payload["version"]:

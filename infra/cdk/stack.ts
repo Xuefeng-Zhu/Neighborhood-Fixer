@@ -18,19 +18,9 @@ import {
   aws_amplify as amplify,
   aws_location as location,
 } from 'aws-cdk-lib';
-import { retainLegacyLogin } from './legacy-login';
-
-export interface NeighborhoodFixerStackProps extends cdk.StackProps {
-  /** Migration deployment only; omitted in the final Clerk-only template. */
-  retainLegacyCognito?: boolean;
-}
 
 export class NeighborhoodFixerStack extends cdk.Stack {
-  constructor(
-    scope: Construct,
-    id: string,
-    props?: NeighborhoodFixerStackProps,
-  ) {
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
     const root = path.resolve(__dirname, '../..');
     const customFrontendOrigin = new cdk.CfnParameter(this, 'FrontendOrigin', {
@@ -199,7 +189,6 @@ export class NeighborhoodFixerStack extends cdk.Stack {
     const secret = new secrets.Secret(this, 'PortalSecret', {
       generateSecretString: { passwordLength: 48, excludePunctuation: true },
     });
-    if (props?.retainLegacyCognito) retainLegacyLogin(this, frontendOrigin);
     const common = {
       NF_MODE: 'aws',
       NF_ENVIRONMENT: 'demo',

@@ -289,27 +289,6 @@ test('Clerk instance, quota and generation configuration is explicit and server 
     template.hasOutput(name, { Value: Match.anyValue() });
 });
 
-test('legacy login survives only an explicit migration synthesis and never authorizes the new API', () => {
-  const migration = Template.fromStack(
-    new NeighborhoodFixerStack(new App(), 'Migration', {
-      env: { account: '111122223333', region: 'us-west-2' },
-      retainLegacyCognito: true,
-    }),
-  );
-  for (const kind of ['UserPool', 'UserPoolClient', 'UserPoolDomain'])
-    migration.resourceCountIs(`AWS::Cognito::${kind}`, 1);
-  migration.hasResourceProperties('AWS::ApiGatewayV2::Authorizer', {
-    JwtConfiguration: {
-      Issuer: { Ref: 'ClerkIssuerUrl' },
-      Audience: [{ Ref: 'AuthAudience' }],
-    },
-  });
-  const pool = Object.values(
-    migration.findResources('AWS::Cognito::UserPool'),
-  )[0];
-  assert.equal(pool.DeletionPolicy, 'Retain');
-});
-
 test('hosted frontend headers permit Clerk and map execution with no unsafe script evaluation', () => {
   const app = Object.values(template.findResources('AWS::Amplify::App'))[0];
   const headers = JSON.stringify(app.Properties.CustomHeaders);
