@@ -486,6 +486,12 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       resultPath: '$.result',
       retryOnServiceExceptions: false,
     });
+    run.addRetry({
+      errors: ['ConcurrentUpdate'],
+      interval: cdk.Duration.seconds(1),
+      maxAttempts: 3,
+      backoffRate: 2,
+    });
     run.addCatch(fail, { resultPath: sfn.JsonPath.DISCARD });
     const callback = new tasks.LambdaInvoke(
       this,

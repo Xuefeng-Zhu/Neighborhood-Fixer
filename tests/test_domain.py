@@ -491,6 +491,14 @@ def test_evidence_sanitized_scoped_and_public_projection(system):
     detail = client.get("/api/incidents/" + case["id"]).json()
     assert detail["draft"] is None
     assert detail["owner_id"] == ""
+    public_card = next(
+        item
+        for item in client.get("/api/incidents").json()["items"]
+        if item["id"] == case["id"]
+    )
+    assert public_card["thumbnail_url"] == (
+        "/api/evidence/" + evidence["id"] + "?public=true"
+    )
     assert (
         client.get("/api/evidence/" + evidence["id"] + "?public=true").status_code
         == 200
