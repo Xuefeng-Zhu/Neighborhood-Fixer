@@ -62,3 +62,48 @@ def prepare(incident, routing, principal):
         "recipient": routing["recipient"],
         "provenance": "Local deterministic report fixture.",
     }
+
+
+def simulate_voice(envelope, principal):
+    return {
+        "turns": [
+            {
+                "speaker": "reporting_agent",
+                "intent": "report_issue",
+                "fact_ids": ["category", "description"],
+                "variant_id": "report_standard",
+            },
+            {
+                "speaker": "fictional_intake_agent",
+                "intent": "request_location",
+                "fact_ids": [],
+                "variant_id": "ask_location_standard",
+            },
+            {
+                "speaker": "reporting_agent",
+                "intent": "answer_location",
+                "fact_ids": ["location", "jurisdiction"],
+                "variant_id": "location_standard",
+            },
+            {
+                "speaker": "fictional_intake_agent",
+                "intent": "acknowledge",
+                "fact_ids": [],
+                "variant_id": "acknowledge_standard",
+            },
+            {
+                "speaker": "reporting_agent",
+                "intent": "ask_next_step",
+                "fact_ids": [],
+                "variant_id": "next_step_standard",
+            },
+            {
+                "speaker": "fictional_intake_agent",
+                "intent": "close",
+                "fact_ids": [],
+                "variant_id": "close_standard",
+            },
+        ],
+        "provenance": "Local deterministic voice fixture — no model or phone call.",
+        "agent_activity": [],
+    }

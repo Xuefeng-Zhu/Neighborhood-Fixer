@@ -55,3 +55,33 @@ class PreparedReport(StrictOutput):
     ]
     missing_information: list[str]
     decision_summary: str = Field(max_length=1200)
+
+
+class VoiceSideTurn(StrictOutput):
+    intent: Literal[
+        "report_issue",
+        "answer_location",
+        "ask_next_step",
+        "request_location",
+        "acknowledge",
+        "close",
+    ]
+    fact_ids: list[str] = Field(max_length=4)
+    variant_id: Literal[
+        "report_standard",
+        "report_concise",
+        "ask_location_standard",
+        "ask_location_brief",
+        "location_standard",
+        "location_concise",
+        "acknowledge_standard",
+        "acknowledge_brief",
+        "next_step_standard",
+        "next_step_brief",
+        "close_standard",
+        "close_brief",
+    ]
+
+
+class VoiceSide(StrictOutput):
+    turns: list[VoiceSideTurn] = Field(min_length=3, max_length=3)

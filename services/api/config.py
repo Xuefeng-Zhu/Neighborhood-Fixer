@@ -1,6 +1,13 @@
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-import os
+
+
+def _enabled(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default).strip().lower()
+    if value not in ("0", "1", "false", "true"):
+        raise ValueError(f"{name} must be true or false")
+    return value in ("1", "true")
 
 
 @dataclass
@@ -85,6 +92,44 @@ class Settings:
     status_interval: int = field(
         default_factory=lambda: int(os.getenv("NF_STATUS_INTERVAL_SECONDS", "60"))
     )
+    contact_research_enabled: bool = field(
+        default_factory=lambda: _enabled("NF_CONTACT_RESEARCH_ENABLED")
+    )
+    brave_search_secret_arn: str = field(
+        default_factory=lambda: os.getenv("NF_BRAVE_SEARCH_SECRET_ARN", "")
+    )
+    voice_transcripts_table: str = field(
+        default_factory=lambda: os.getenv("NF_VOICE_TRANSCRIPTS_TABLE", "")
+    )
+    outreach_provider_function: str = field(
+        default_factory=lambda: os.getenv("NF_OUTREACH_PROVIDER_FUNCTION", "")
+    )
+    contact_research_function: str = field(
+        default_factory=lambda: os.getenv("NF_CONTACT_RESEARCH_FUNCTION", "")
+    )
+    contact_research_daily_limit: int = field(
+        default_factory=lambda: int(os.getenv("NF_CONTACT_RESEARCH_DAILY_LIMIT", "10"))
+    )
+    workspace_contact_research_daily_limit: int = field(
+        default_factory=lambda: int(
+            os.getenv("NF_WORKSPACE_CONTACT_RESEARCH_DAILY_LIMIT", "100")
+        )
+    )
+    voice_simulation_daily_limit: int = field(
+        default_factory=lambda: int(os.getenv("NF_VOICE_SIMULATION_DAILY_LIMIT", "3"))
+    )
+    workspace_voice_simulation_daily_limit: int = field(
+        default_factory=lambda: int(
+            os.getenv("NF_WORKSPACE_VOICE_SIMULATION_DAILY_LIMIT", "30")
+        )
+    )
+    official_domain_exceptions: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            value.strip().lower()
+            for value in os.getenv("NF_OFFICIAL_DOMAIN_EXCEPTIONS", "").split(",")
+            if value.strip()
+        )
+    )
 
     def __post_init__(self):
         import re
@@ -132,10 +177,34 @@ class Settings:
             raise ValueError(
                 "NF_ENVIRONMENT must be development, test, demo, or production"
             )
+        if any(
+            not 1 <= value <= 10000
+            for value in (
+                self.contact_research_daily_limit,
+                self.workspace_contact_research_daily_limit,
+                self.voice_simulation_daily_limit,
+                self.workspace_voice_simulation_daily_limit,
+            )
+        ):
+            raise ValueError("Outreach daily limits must be finite positive values")
+        import re
+
+        if any(
+            not re.fullmatch(
+                r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}",
+                value,
+            )
+            for value in self.official_domain_exceptions
+        ):
+            raise ValueError("Official domain exceptions must be exact hostnames")
 
     @property
     def local_controls(self) -> bool:
         return self.mode == "local" and self.environment == "development"
+
+    @property
+    def outreach_enabled(self) -> bool:
+        return self.mode == "local" or self.contact_research_enabled
 
     def secret(self) -> str:
         value = os.getenv("NF_SESSION_SECRET")

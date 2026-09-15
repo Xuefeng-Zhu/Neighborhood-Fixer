@@ -27,6 +27,7 @@ import {
   StatusPair,
 } from '../components/ui';
 import { AnalysisView } from './Report';
+import { OfficialOutreach } from './OfficialOutreach';
 import { useSession } from '../lib/session';
 export function CaseDetail() {
   const { request, post } = useApi();
@@ -237,6 +238,9 @@ export function CaseDetail() {
               </div>
             </section>
           ) : null}
+          {!incident.is_sample && incident.is_owner && (
+            <OfficialOutreach incident={incident} />
+          )}
           <section className="detail-section">
             <h2>Case activity</h2>
             {incident.events?.length ? (

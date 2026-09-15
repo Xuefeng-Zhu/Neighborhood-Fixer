@@ -34,6 +34,74 @@ async function report(page: Page, share = true) {
   ).toBeVisible();
   await page.getByRole('button', { name: 'Check nearby cases' }).click();
 }
+
+async function demonstrateInternalOutreach(page: Page) {
+  await page.getByRole('button', { name: 'Find official contact' }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Confirm the government area' }),
+  ).toBeVisible();
+  const search = page.getByRole('button', {
+    name: 'Confirm Seattle and search',
+  });
+  await expect(search).toBeDisabled();
+  await page
+    .getByLabel('I confirm this case is in Seattle, Washington.')
+    .check();
+  await search.click();
+
+  const contacts = page.getByRole('radio', { name: /City of Seattle/ });
+  await expect(contacts.first()).toBeVisible();
+  await expect(contacts.first()).not.toBeChecked();
+  await expect(page.locator('a[href^="mailto:"]')).toHaveCount(0);
+  await expect(page.locator('a[href^="tel:"]')).toHaveCount(0);
+  await contacts.first().check();
+  await page.getByRole('button', { name: 'Use selected contact' }).click();
+
+  await page.getByRole('button', { name: 'Prepare demo email' }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Review exact demo email' }),
+  ).toBeVisible();
+  await page
+    .getByLabel(/I approve this exact internal email simulation/)
+    .check();
+  await page
+    .getByRole('button', { name: 'Approve exact email simulation' })
+    .click();
+  await page
+    .getByRole('button', { name: 'Run approved email simulation' })
+    .click();
+  await expect(page.getByText('Email simulation recorded')).toBeVisible();
+  await expect(page.getByText(/No email was sent/)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Prepare demo call' }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Review demo call envelope' }),
+  ).toBeVisible();
+  await page.getByLabel(/I approve this internal call simulation/).check();
+  await page
+    .getByRole('button', { name: 'Approve demo call envelope' })
+    .click();
+  await page.getByRole('button', { name: 'Start approved demo call' }).click();
+  await expect(page.getByText('SIMULATED · NOT DIALED')).toBeVisible({
+    timeout: 30000,
+  });
+  await expect(page.getByRole('log')).toHaveCount(0);
+  const audioRequest = page.waitForRequest((request) =>
+    /\/outreach\/voice\/runs\/[^/]+\/turns\/[^/]+\/audio$/.test(
+      new URL(request.url()).pathname,
+    ),
+  );
+  await page.getByRole('button', { name: 'Play approved demo call' }).click();
+  const privateAudio = await audioRequest;
+  expect(privateAudio.headers()['x-nf-playback-token']).toBeTruthy();
+  expect(new URL(privateAudio.url()).search).toBe('');
+  await expect(page.getByRole('log')).toContainText(/pothole|sidewalk|curb/i);
+  await page.getByRole('button', { name: 'End demo call' }).click();
+  await expect(page.getByText('Call simulation complete')).toBeVisible();
+  await expect(
+    page.getByText(/Audio and captions were temporary and were not saved/),
+  ).toBeVisible();
+}
 test('two residents share one report, distinguish closure and verify the repair', async ({
   page,
 }) => {
@@ -63,6 +131,7 @@ test('two residents share one report, distinguish closure and verify the repair'
   await expect(
     page.getByRole('button', { name: 'Approve exact submission' }),
   ).toBeDisabled();
+  await demonstrateInternalOutreach(page);
   await page.getByLabel('Local demo resident').selectOption('sam');
   await expect(page.getByLabel('Local demo resident')).toHaveValue('sam');
   await report(page);

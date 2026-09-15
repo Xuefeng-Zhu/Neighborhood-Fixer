@@ -56,14 +56,15 @@ function wrap(d: Draft = draft, record: Incident = incident) {
     </QueryClientProvider>
   );
 }
-function renderCaseDetail(mode: 'local' | 'aws') {
+function renderCaseDetail(
+  mode: 'local' | 'aws',
+  record: Incident = sampleIncident as Incident,
+) {
   vi.stubGlobal(
     'fetch',
     vi
       .fn()
-      .mockResolvedValue(
-        new Response(JSON.stringify(sampleIncident), { status: 200 }),
-      ),
+      .mockResolvedValue(new Response(JSON.stringify(record), { status: 200 })),
   );
   return render(
     <QueryClientProvider client={new QueryClient()}>
@@ -232,6 +233,26 @@ describe('illustrative shared sample', () => {
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole('button', { name: 'Cancel if not yet sent' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', {
+        name: 'Official contact & demo outreach',
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps private outreach controls hidden from case followers', async () => {
+    renderCaseDetail('local', {
+      ...sampleIncident,
+      id: 'followed-case',
+      is_sample: false,
+      is_owner: false,
+    } as Incident);
+    expect(await screen.findByText('Illustrative curb')).toBeVisible();
+    expect(
+      screen.queryByRole('heading', {
+        name: 'Official contact & demo outreach',
+      }),
     ).not.toBeInTheDocument();
   });
 

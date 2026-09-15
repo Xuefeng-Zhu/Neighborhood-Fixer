@@ -1600,6 +1600,383 @@ code {
   font-size: 11px;
   margin-bottom: 10px;
 }
+.outreach-section {
+  padding: 28px 0 30px;
+}
+.outreach-heading {
+  align-items: flex-start;
+}
+.outreach-heading > div {
+  min-width: 0;
+}
+.outreach-heading > svg {
+  color: #4d7767;
+  margin-top: 18px;
+}
+.outreach-kicker {
+  color: #6b806f;
+  display: block;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 1.2px;
+  margin-bottom: 5px;
+}
+.outreach-intro {
+  color: #5c7473;
+  font-size: 13px;
+  line-height: 1.65;
+  margin: 8px 0 20px;
+  max-width: 650px;
+}
+.outreach-step {
+  background: #fbfcf8;
+  border: 1px solid #d7e0d7;
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 32px minmax(0, 1fr);
+  margin-top: 14px;
+  padding: 18px;
+}
+.outreach-step h3 {
+  font-size: 17px;
+  margin: 1px 0 7px;
+}
+.outreach-step p {
+  color: #5c7272;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.outreach-step .button {
+  margin-top: 15px;
+}
+.outreach-step-icon {
+  align-items: center;
+  background: #e5efea;
+  border-radius: 50%;
+  color: #315f55;
+  display: flex;
+  height: 32px;
+  justify-content: center;
+  width: 32px;
+}
+.outreach-step-body {
+  min-width: 0;
+}
+.outreach-badge {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.75px;
+  line-height: 1.3;
+  margin-bottom: 9px;
+  padding: 4px 8px;
+}
+.outreach-badge.research {
+  background: #dcebe8;
+  color: #20554e;
+}
+.outreach-badge.email {
+  background: #eee8d7;
+  color: #705820;
+}
+.outreach-badge.voice {
+  background: #e5e5f0;
+  color: #4b4f78;
+}
+.jurisdiction-card {
+  background: #fff;
+  border-left: 3px solid #80a895;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 13px 0 10px;
+  padding: 13px 14px;
+}
+.jurisdiction-card strong {
+  color: #204d46;
+  font-size: 14px;
+}
+.jurisdiction-card span {
+  color: #4c6869;
+  font-size: 12px;
+}
+.jurisdiction-card small {
+  color: #71827c;
+  font-size: 10px;
+}
+.outreach-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 14px;
+}
+.outreach-actions .button,
+.outreach-actions .text-button {
+  margin: 0;
+}
+.contact-options {
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin: 15px 0 0;
+  padding: 0;
+}
+.contact-card {
+  align-items: flex-start;
+  background: #fff;
+  border: 1px solid #d4dddd;
+  border-radius: 7px;
+  cursor: default;
+  display: flex;
+  gap: 11px;
+  padding: 14px;
+}
+
+.contact-choice-label {
+  display: flex;
+  cursor: pointer;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.contact-card:hover,
+.contact-card.selected {
+  border-color: #5e8e75;
+}
+.contact-card.selected {
+  background: #edf4ed;
+  box-shadow: inset 0 0 0 1px #5e8e75;
+}
+.contact-card-body {
+  color: #486164;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 3px;
+  min-width: 0;
+}
+.contact-card-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+.contact-card-heading strong {
+  color: #173f3f;
+  font-size: 14px;
+}
+.official-source {
+  background: #e0eee7;
+  border-radius: 4px;
+  color: #2a634f;
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 3px 6px;
+}
+.contact-card small {
+  color: #6a7e7b;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.contact-card a {
+  align-items: center;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 5px;
+  margin-top: 4px;
+  width: fit-content;
+}
+.selected-contact-note {
+  align-items: center;
+  color: #31624e;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 650;
+  gap: 5px;
+}
+.outreach-channels {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 14px;
+}
+.simulation-card {
+  background: #fff;
+  border: 1px solid #d6dddd;
+  border-radius: 8px;
+  min-width: 0;
+  padding: 18px;
+}
+.simulation-card > svg {
+  color: #4e756c;
+  margin-bottom: 8px;
+}
+.simulation-card h3 {
+  font-size: 17px;
+  margin-bottom: 7px;
+}
+.simulation-card > p {
+  color: #5a7072;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.simulation-card > .button {
+  margin-top: 14px;
+}
+.simulation-card.complete {
+  background: #f0f6ef;
+  border-color: #c8dccb;
+}
+.research-reference {
+  background: #f3f4ef;
+  border-radius: 5px;
+  margin-top: 13px;
+  overflow-wrap: anywhere;
+  padding: 10px;
+}
+.research-reference strong,
+.research-reference small {
+  display: block;
+}
+.research-reference small {
+  color: #78847e;
+  font-size: 10px;
+  margin-top: 3px;
+}
+.email-preview {
+  border-bottom: 1px solid #e0e4de;
+  border-top: 1px solid #e0e4de;
+  display: grid;
+  gap: 6px;
+  margin: 15px 0;
+  padding: 13px 0;
+}
+.email-preview > span {
+  color: #75827c;
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.email-preview strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.email-preview p {
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+.voice-envelope {
+  background: #f5f6f2;
+  border-radius: 6px;
+  margin: 14px 0;
+  padding: 13px;
+}
+.voice-envelope h4 {
+  font-size: 11px;
+  margin: 12px 0 5px;
+  text-transform: uppercase;
+}
+.voice-envelope h4:first-child {
+  margin-top: 0;
+}
+.voice-envelope dl {
+  margin: 0;
+}
+.voice-envelope dl > div {
+  display: grid;
+  font-size: 11px;
+  gap: 7px;
+  grid-template-columns: 72px 1fr;
+  margin: 5px 0;
+}
+.voice-envelope dt {
+  color: #72807c;
+}
+.voice-envelope dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.voice-envelope p,
+.voice-envelope li {
+  color: #526767;
+  font-size: 11px;
+  line-height: 1.55;
+}
+.voice-envelope ul {
+  margin: 5px 0;
+  padding-left: 17px;
+}
+.call-live {
+  background: #f8faf8;
+  grid-column: 1 / -1;
+}
+.call-metrics {
+  color: #627474;
+  display: flex;
+  font-size: 11px;
+  gap: 15px;
+  justify-content: space-between;
+  margin: 2px 0 12px;
+}
+.call-status {
+  color: #21544d;
+  font-size: 12px;
+  font-weight: 650;
+  margin-bottom: 10px;
+}
+.caption-log {
+  background: #132e31;
+  border-radius: 7px;
+  color: #eef6f2;
+  list-style: none;
+  margin: 0;
+  min-height: 120px;
+  padding: 14px;
+}
+.caption-log li {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 2px;
+  line-height: 1.55;
+  margin: 0 0 11px;
+}
+.caption-log li:last-child {
+  margin-bottom: 0;
+}
+.caption-log li.current {
+  color: #fff3c9;
+}
+.caption-log strong {
+  color: #9fc9ba;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.simulation-receipt {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 13px 0;
+}
+.simulation-receipt > div {
+  display: grid;
+  font-size: 11px;
+  gap: 8px;
+  grid-template-columns: 62px 1fr;
+}
+.simulation-receipt dt {
+  color: #718079;
+}
+.simulation-receipt dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 @media (min-width: 1440px) {
   .page {
     padding-top: 35px;
@@ -1987,6 +2364,9 @@ code {
   .pick-map {
     order: 0;
   }
+  .outreach-channels {
+    grid-template-columns: 1fr;
+  }
 }
 @media (max-width: 480px) {
   .app-header {
@@ -2210,6 +2590,40 @@ code {
   }
   .integration-status dl > div {
     grid-template-columns: 100px 1fr;
+  }
+  .outreach-step {
+    grid-template-columns: 1fr;
+    padding: 15px;
+  }
+  .outreach-step-icon {
+    height: 29px;
+    width: 29px;
+  }
+  .contact-card {
+    padding: 12px;
+  }
+  .contact-card-heading {
+    flex-direction: column;
+    gap: 5px;
+  }
+  .official-source {
+    width: fit-content;
+  }
+  .outreach-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .outreach-actions .button,
+  .outreach-actions .text-button {
+    justify-content: center;
+    width: 100%;
+  }
+  .simulation-card {
+    padding: 15px;
+  }
+  .call-metrics {
+    flex-direction: column;
+    gap: 3px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

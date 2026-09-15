@@ -1,6 +1,7 @@
 from enum import StrEnum
 from typing import Any, Literal
-from pydantic import BaseModel, Field, ConfigDict
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StrictModel(BaseModel):
@@ -120,6 +121,36 @@ class TicketStatusInput(StrictModel):
 
 class ScenarioInput(StrictModel):
     lost_receipt: bool
+
+
+class ContactResearchInput(StrictModel):
+    candidate_id: str = Field(min_length=16, max_length=80)
+    context_hash: str = Field(min_length=64, max_length=64)
+    confirmed: Literal[True]
+    refresh: bool = False
+
+
+class ContactSelectionInput(StrictModel):
+    research_id: str = Field(min_length=16, max_length=80)
+    contact_id: str = Field(min_length=16, max_length=80)
+
+
+class OutreachEmailDraftInput(StrictModel):
+    pass
+
+
+class OutreachApprovalInput(StrictModel):
+    draft_id: str = Field(min_length=16, max_length=80)
+    payload_hash: str = Field(min_length=64, max_length=64)
+
+
+class VoiceApprovalInput(StrictModel):
+    envelope_id: str = Field(min_length=16, max_length=80)
+    payload_hash: str = Field(min_length=64, max_length=64)
+
+
+class VoiceEndInput(StrictModel):
+    reason: Literal["completed", "resident"] = "resident"
 
 
 class Analysis(StrictModel):
@@ -284,6 +315,197 @@ class Notification(BaseModel):
 
 class OperationResponse(BaseModel):
     operation_id: str
+
+
+class JurisdictionCandidate(BaseModel):
+    id: str
+    incident_id: str
+    display_name: str
+    locality: str
+    municipality: str
+    region: str
+    country_code: str
+    label: str
+    supported: bool
+    provider: str
+    context_hash: str
+    status: Literal["AWAITING_CONFIRMATION", "CONFIRMED", "STALE", "EXPIRED"]
+    created_at: str
+    expires_at: str
+
+
+class OfficialContact(BaseModel):
+    id: str
+    agency: str = Field(max_length=120)
+    role: str = Field(max_length=120)
+    email: str | None = Field(default=None, max_length=200)
+    phone: str | None = Field(default=None, pattern=r"^\d{3}-\d{3}-\d{4}$")
+    source_title: str = Field(max_length=160)
+    source_url: str = Field(max_length=2048, pattern=r"^https://")
+    source_hostname: str = Field(max_length=253)
+    match_reason: str = Field(max_length=300)
+    retrieved_at: str
+
+
+class ContactResearchScope(BaseModel):
+    jurisdiction: Literal["Seattle, WA"]
+    category: Category
+
+
+class ContactResearch(BaseModel):
+    id: str
+    incident_id: str
+    candidate_id: str
+    context_hash: str
+    status: Literal["PENDING", "READY", "FAILED", "STALE", "EXPIRED"]
+    query_scope: ContactResearchScope
+    contacts: list[OfficialContact] = Field(max_length=3)
+    provider: str
+    selected_contact_id: str | None = None
+    created_at: str
+    expires_at: str
+
+
+class ContactSelection(BaseModel):
+    id: str
+    incident_id: str
+    research_id: str
+    contact_id: str
+    contact: OfficialContact
+    context_hash: str
+    status: Literal["SELECTED", "STALE"]
+    selected_at: str
+
+
+class OutreachDraft(BaseModel):
+    id: str
+    incident_id: str
+    channel: Literal["email"]
+    revision: int
+    subject: str
+    body: str
+    research_reference: OfficialContact
+    selected_contact: OfficialContact | None = None
+    research_snapshot_id: str
+    execution_target: Literal["internal-email-simulator-v1"]
+    context_hash: str
+    payload_hash: str
+    status: Literal["AWAITING_APPROVAL", "APPROVED", "STALE", "SIMULATED_NOT_SENT"]
+    created_at: str
+    expires_at: str
+
+
+class VoiceFact(BaseModel):
+    id: Literal["category", "description", "location", "jurisdiction"]
+    label: str
+    value: str = Field(max_length=160)
+
+
+class VoiceEnvelope(BaseModel):
+    id: str
+    incident_id: str
+    revision: int
+    facts: list[VoiceFact] = Field(min_length=4, max_length=4)
+    allowed_intents: dict[str, list[str]]
+    refusal_rules: list[str] = Field(max_length=6)
+    max_turns: Literal[6]
+    max_duration_seconds: Literal[90]
+    research_reference: OfficialContact
+    selected_contact: OfficialContact | None = None
+    research_snapshot_id: str
+    execution_target: Literal["internal-voice-simulator-v1"]
+    context_hash: str
+    payload_hash: str
+    status: Literal[
+        "AWAITING_APPROVAL",
+        "APPROVED",
+        "GENERATING",
+        "RUNNING",
+        "FAILED",
+        "STALE",
+    ]
+    variability_notice: str
+    created_at: str
+    expires_at: str
+
+
+class OutreachApproval(BaseModel):
+    id: str
+    incident_id: str
+    record_id: str
+    payload_hash: str
+    action: Literal["simulate_email", "simulate_voice"]
+    status: Literal["APPROVED", "STALE"]
+    created_at: str
+    expires_at: str
+
+
+class VoiceTurn(BaseModel):
+    id: str
+    speaker: Literal["reporting_agent", "fictional_intake_agent"]
+    intent: str
+    fact_ids: list[str]
+    variant_id: str
+    caption: str = Field(max_length=300)
+    audio_url: str
+
+
+class VoiceRun(BaseModel):
+    id: str
+    incident_id: str
+    envelope_id: str
+    payload_hash: str
+    status: Literal[
+        "GENERATING",
+        "RUNNING",
+        "FAILED",
+        "COMPLETED",
+        "ENDED",
+        "INTERRUPTED",
+        "STALE",
+        "EXPIRED",
+    ]
+    execution_target: Literal["internal-voice-simulator-v1"]
+    created_at: str
+    ready_at: str | None = None
+    started_at: str | None = None
+    transcript_expires_at: str | None = None
+    turn_count: int | None = None
+    research_snapshot_id: str
+    playback_token: str | None = Field(default=None, min_length=32, max_length=128)
+    turns: list[VoiceTurn] | None = Field(default=None, max_length=6)
+
+
+class SimulationReceipt(BaseModel):
+    id: str
+    incident_id: str
+    channel: Literal["email", "voice"]
+    status: Literal["SIMULATED_NOT_SENT", "SIMULATED_NOT_DIALED"]
+    execution_target: Literal[
+        "internal-email-simulator-v1", "internal-voice-simulator-v1"
+    ]
+    payload_hash: str
+    summary: str
+    subject: str | None = None
+    duration_seconds: int | None = None
+    turn_count: int | None = None
+    run_status: Literal["COMPLETED", "ENDED", "INTERRUPTED"] | None = None
+    research_snapshot_id: str
+    created_at: str
+
+
+class OutreachSnapshot(BaseModel):
+    available: bool
+    disabled_reason: str | None = None
+    voice_available: bool
+    jurisdiction: JurisdictionCandidate | None = None
+    research: ContactResearch | None = None
+    selection: ContactSelection | None = None
+    email_draft: OutreachDraft | None = None
+    email_receipt: SimulationReceipt | None = None
+    voice_envelope: VoiceEnvelope | None = None
+    voice_run: VoiceRun | None = None
+    voice_receipt: SimulationReceipt | None = None
 
 
 class ErrorBody(BaseModel):

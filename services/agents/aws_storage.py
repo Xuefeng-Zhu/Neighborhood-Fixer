@@ -6,10 +6,10 @@ not a claim of unlimited single-partition throughput. Normal reads use bounded
 strongly consistent Query/GetItem operations, never Scan or an eventual lock.
 """
 
-from contextlib import contextmanager
-from copy import deepcopy
 import json
 import uuid
+from contextlib import contextmanager
+from copy import deepcopy
 
 
 class ConcurrentUpdate(RuntimeError):
@@ -89,16 +89,16 @@ class DynamoTransaction:
     def list(self, kind, limit=200, after=None):
         self._guard()
         limit = min(max(int(limit), 1), 500)
-        params = dict(
-            TableName=self.store.table_name,
-            KeyConditionExpression="pk = :pk AND begins_with(sk, :prefix)",
-            ExpressionAttributeValues={
+        params = {
+            "TableName": self.store.table_name,
+            "KeyConditionExpression": "pk = :pk AND begins_with(sk, :prefix)",
+            "ExpressionAttributeValues": {
                 ":pk": {"S": self.pk},
                 ":prefix": {"S": f"{kind}#"},
             },
-            ConsistentRead=True,
-            Limit=limit,
-        )
+            "ConsistentRead": True,
+            "Limit": limit,
+        }
         if after:
             params["ExclusiveStartKey"] = self._key(f"{kind}#{after}")
         response = self.store.client.query(**params)
@@ -153,6 +153,14 @@ class DynamoTransaction:
                     data.get("expires_at"), int
                 ):
                     item["expires_epoch"] = {"N": str(data["expires_at"])}
+                if sk.startswith("contact_research#") and isinstance(
+                    data.get("expires_epoch"), int
+                ):
+                    item["expires_epoch"] = {"N": str(data["expires_epoch"])}
+                if sk.startswith("outreach_request#") and isinstance(
+                    data.get("expires_epoch"), int
+                ):
+                    item["expires_epoch"] = {"N": str(data["expires_epoch"])}
                 writes.append(
                     {"Put": {"TableName": self.store.table_name, "Item": item}}
                 )
@@ -173,11 +181,12 @@ class DynamoTransaction:
 
 def download_evidence(bucket, key, expected_sha256):
     """Materialize approved image bytes in ephemeral private storage and verify hash."""
-    import boto3
     import hashlib
     import os
     import tempfile
     from pathlib import Path
+
+    import boto3
 
     if not bucket or not key or not expected_sha256:
         raise ValueError("Evidence reference and expected hash are required")

@@ -1,8 +1,8 @@
 """AgentCore Runtime HTTP entrypoint; deploy via IAM-authenticated Runtime API."""
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from . import engine
 
+from . import engine
 from .observability import configure
 
 tracer = configure()
@@ -12,7 +12,13 @@ app = BedrockAgentCoreApp()
 @app.entrypoint
 async def invoke(payload, context):
     action = payload.get("action")
-    if action not in ("analyze", "route", "prepare", "review_case"):
+    if action not in (
+        "analyze",
+        "route",
+        "prepare",
+        "review_case",
+        "simulate_voice",
+    ):
         raise ValueError("Unsupported reasoning phase")
     principal = payload.get("principal", {})
     # Only trusted backend IAM can invoke this runtime; it supplies the principal
@@ -43,6 +49,10 @@ async def _execute(action, args, principal):
         )
     if action == "route":
         return await asyncio.to_thread(engine.route, args["observation"], principal)
+    if action == "simulate_voice":
+        return await asyncio.to_thread(
+            engine.simulate_voice, args["envelope"], principal
+        )
     return await asyncio.to_thread(
         engine.prepare, args["incident"], args["routing"], principal
     )

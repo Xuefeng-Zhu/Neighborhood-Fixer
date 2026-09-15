@@ -30,13 +30,13 @@ Authorized deployment and model evaluation; accessibility testing with residents
 
 ## Participant completion fields
 
-- Repository URL: `https://github.com/Xuefeng-Zhu/Neighborhood-Fixer` (currently private; change visibility only after a separate publication review).
-- Public YouTube/Vimeo demo video: not recorded or uploaded by this build.
-- AWS Builder ID: participant supplies through Devpost.
+- Repository URL: `https://github.com/Xuefeng-Zhu/Neighborhood-Fixer` (public, with a detected MIT license).
+- Public YouTube demo video: `https://youtu.be/vaL5yUI5OX4` (3:28).
+- AWS Builder ID: `frankzhu94@gmail.com`.
 - Live demo URL: `https://main.d12il66dljooo6.amplifyapp.com/`.
-- Architecture: `docs/architecture.mmd`.
+- Architecture: source `docs/architecture.mmd`; rendered PNG attached to the Devpost entry as `neighbor_architecture.png`.
 - Actual validation: `docs/TEST-REPORT.md`.
 - License: MIT.
 - Disclosure: `docs/DISCLOSURE.md`, `fixtures/ATTRIBUTION.md`.
 
-Check participant eligibility and the [current official rules](https://agentsforhumans.devpost.com/rules) before submitting. This file is draft content only; no registration, publication, or submission has occurred.
+The project is publicly available at `https://devpost.com/software/neighborhood-fixer`. Devpost records it as entered in the Agents for Humans Hackathon with all five form steps complete. The official rules remain the source of truth for eligibility.

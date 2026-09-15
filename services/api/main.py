@@ -1,16 +1,16 @@
-from io import BytesIO
-from pathlib import Path
 import hashlib
 import os
-import uuid
 import time
+import uuid
 from datetime import datetime
+from io import BytesIO
+from pathlib import Path
 
-from fastapi import FastAPI, Depends, Request, Response, UploadFile, File
+from fastapi import Depends, FastAPI, File, Header, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .config import Settings
@@ -19,21 +19,36 @@ from .models import (
     ApprovalInput,
     Category,
     ClockInput,
+    ContactResearch,
+    ContactResearchInput,
+    ContactSelection,
+    ContactSelectionInput,
     DraftInput,
     DuplicateDecision,
     ErrorEnvelope,
     Incident,
+    JurisdictionCandidate,
     Observation,
     ObservationInput,
     ObservationPatch,
     OperationResponse,
+    OutreachApproval,
+    OutreachApprovalInput,
+    OutreachDraft,
+    OutreachEmailDraftInput,
+    OutreachSnapshot,
     ScenarioInput,
     SessionRequest,
     SessionResponse,
+    SimulationReceipt,
     SubmissionDraft,
     SubscriptionInput,
     TicketStatusInput,
     VerificationInput,
+    VoiceApprovalInput,
+    VoiceEndInput,
+    VoiceEnvelope,
+    VoiceRun,
 )
 
 Image.MAX_IMAGE_PIXELS = 20_000_000
@@ -69,7 +84,12 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
         allow_origins=list(settings.allowed_origins),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH"],
-        allow_headers=["Content-Type", "Authorization", "Idempotency-Key"],
+        allow_headers=[
+            "Content-Type",
+            "Authorization",
+            "Idempotency-Key",
+            "X-NF-Playback-Token",
+        ],
     )
 
     def backend():
@@ -103,7 +123,7 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
         response = await call_next(request)
         response.headers["X-Correlation-ID"] = correlation
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Cache-Control"] = "no-store"
+        response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
@@ -305,6 +325,39 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
                     "simulated",
                     "Demo Borough Public Works",
                     "Fictional portal. Real municipal submissions are disabled.",
+                ),
+                "contact_research": component(
+                    "simulated"
+                    if local
+                    else (
+                        "configured"
+                        if settings.outreach_enabled
+                        and settings.outreach_provider_function
+                        else "unavailable"
+                    ),
+                    "Local deterministic contact fixture"
+                    if local
+                    else "Amazon Location + Brave Search",
+                    "Research only. Selected public contacts are never messaged or called.",
+                ),
+                "voice_simulation": component(
+                    "simulated"
+                    if local
+                    else (
+                        "configured"
+                        if settings.outreach_enabled
+                        and settings.voice_transcripts_table
+                        else "unavailable"
+                    ),
+                    "Deterministic tone fixture"
+                    if local
+                    else "AgentCore Runtime + Amazon Polly",
+                    "Internal playback only. No phone number is dialed and audio is not stored.",
+                ),
+                "email_simulation": component(
+                    "simulated",
+                    "Neighborhood Fixer internal email simulator",
+                    "No SES, SMTP, or external delivery provider is used.",
                 ),
             },
             "missing_configuration": missing,
@@ -521,6 +574,246 @@ def create_app(settings: Settings | None = None, domain: Domain | None = None):
     @app.get("/api/incidents/{incident_id}", response_model=Incident)
     def incident(incident_id: str, p=Depends(principal)):
         return backend().incident_detail(p, incident_id)
+
+    @app.get(
+        "/api/incidents/{incident_id}/outreach",
+        response_model=OutreachSnapshot,
+        response_model_exclude_none=True,
+    )
+    def outreach_snapshot(incident_id: str, p=Depends(principal)):
+        return backend().outreach_snapshot(p, incident_id)
+
+    @app.post(
+        "/api/incidents/{incident_id}/jurisdiction-preview",
+        response_model=JurisdictionCandidate,
+        status_code=201,
+    )
+    def jurisdiction_preview(
+        incident_id: str,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().jurisdiction_preview(p, incident_id, idempotency_key)
+
+    @app.post(
+        "/api/incidents/{incident_id}/contact-research",
+        response_model=ContactResearch,
+        status_code=201,
+    )
+    def contact_research(
+        incident_id: str,
+        data: ContactResearchInput,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().contact_research(
+            p,
+            incident_id,
+            data.model_dump(),
+            idempotency_key,
+        )
+
+    @app.post(
+        "/api/incidents/{incident_id}/contact-selection",
+        response_model=ContactSelection,
+        status_code=201,
+    )
+    def contact_selection(
+        incident_id: str,
+        data: ContactSelectionInput,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().select_contact(
+            p,
+            incident_id,
+            data.model_dump(),
+            idempotency_key,
+        )
+
+    @app.post(
+        "/api/incidents/{incident_id}/outreach/email/draft",
+        response_model=OutreachDraft,
+        status_code=201,
+    )
+    def outreach_email_draft(
+        incident_id: str,
+        data: OutreachEmailDraftInput,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().create_email_draft(
+            p,
+            incident_id,
+            data.model_dump(exclude_none=True),
+            idempotency_key,
+        )
+
+    @app.post(
+        "/api/incidents/{incident_id}/outreach/email/approve",
+        response_model=OutreachApproval,
+    )
+    def outreach_email_approve(
+        incident_id: str,
+        data: OutreachApprovalInput,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().approve_email_draft(
+            p,
+            incident_id,
+            data.model_dump(),
+            idempotency_key,
+        )
+
+    @app.post(
+        "/api/incidents/{incident_id}/outreach/email/run",
+        response_model=SimulationReceipt,
+        response_model_exclude_none=True,
+    )
+    def outreach_email_run(
+        incident_id: str,
+        data: OutreachApprovalInput,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().run_email_simulation(
+            p,
+            incident_id,
+            data.model_dump(),
+            idempotency_key,
+        )
+
+    @app.post(
+        "/api/incidents/{incident_id}/outreach/voice/envelope",
+        response_model=VoiceEnvelope,
+        status_code=201,
+    )
+    def outreach_voice_envelope(
+        incident_id: str,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().create_voice_envelope(p, incident_id, idempotency_key)
+
+    @app.post(
+        "/api/incidents/{incident_id}/outreach/voice/approve",
+        response_model=OutreachApproval,
+    )
+    def outreach_voice_approve(
+        incident_id: str,
+        data: VoiceApprovalInput,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().approve_voice_envelope(
+            p,
+            incident_id,
+            data.model_dump(),
+            idempotency_key,
+        )
+
+    @app.post(
+        "/api/incidents/{incident_id}/outreach/voice/run",
+        response_model=VoiceRun,
+        response_model_exclude_none=True,
+    )
+    def outreach_voice_run(
+        incident_id: str,
+        data: VoiceApprovalInput,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().run_voice_simulation(
+            p,
+            incident_id,
+            data.model_dump(),
+            idempotency_key,
+        )
+
+    @app.post(
+        "/api/incidents/{incident_id}/outreach/voice/runs/{run_id}/end",
+        response_model=SimulationReceipt,
+        response_model_exclude_none=True,
+    )
+    def outreach_voice_end(
+        incident_id: str,
+        run_id: str,
+        data: VoiceEndInput | None = None,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        p=Depends(principal),
+    ):
+        return backend().end_voice_simulation(
+            p,
+            incident_id,
+            run_id,
+            data.reason if data else "resident",
+            idempotency_key,
+        )
+
+    @app.get(
+        "/api/incidents/{incident_id}/outreach/voice/runs/{run_id}",
+        response_model=VoiceRun,
+        response_model_exclude_none=True,
+    )
+    def outreach_voice_status(
+        incident_id: str,
+        run_id: str,
+        response: Response,
+        playback_token: str = Header(..., alias="X-NF-Playback-Token"),
+        p=Depends(principal),
+    ):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return backend().voice_run_status(
+            p,
+            incident_id,
+            run_id,
+            playback_token,
+        )
+
+    @app.get(
+        "/api/incidents/{incident_id}/outreach/voice/runs/{run_id}/turns/{turn_id}/audio",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "Transient synthesized turn audio",
+                "content": {
+                    "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
+                    "audio/wav": {"schema": {"type": "string", "format": "binary"}},
+                },
+            }
+        },
+    )
+    def outreach_voice_audio(
+        incident_id: str,
+        run_id: str,
+        turn_id: str,
+        playback_token: str = Header(..., alias="X-NF-Playback-Token"),
+        p=Depends(principal),
+    ):
+        if settings.mode == "aws":
+            raise DomainError(
+                "DEDICATED_AUDIO_ENDPOINT_REQUIRED",
+                "Temporary demo audio is available only from the dedicated streaming endpoint.",
+                503,
+            )
+        stream, media_type = backend().voice_turn_audio(
+            p,
+            incident_id,
+            run_id,
+            turn_id,
+            playback_token,
+        )
+        return StreamingResponse(
+            stream,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "Content-Disposition": 'inline; filename="temporary-demo-turn"',
+            },
+        )
 
     @app.post(
         "/api/incidents/{incident_id}/draft",

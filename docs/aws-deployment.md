@@ -41,6 +41,7 @@ Synthesis registers Docker assets without deploying them. Rebuild both ARM64 ima
 ```sh
 docker build --platform linux/arm64 -f infra/cdk/Dockerfile.lambda -t neighborhood-fixer-lambda .
 docker build --platform linux/arm64 -f infra/cdk/Dockerfile.runtime -t neighborhood-fixer-runtime .
+docker build --platform linux/arm64 -f infra/cdk/Dockerfile.audio -t neighborhood-fixer-audio .
 ```
 
 Docker contexts allowlist source, fixtures, and build inputs. They exclude private environments, credentials, resident evidence, generated outputs, and caches. A successful image build is not a vulnerability scan.
@@ -61,10 +62,12 @@ Required CloudFormation parameters are:
 - `ClerkPublishableKey`: public key matching that issuer
 - `DataGeneration`: explicit deployment generation
 - `MapKeyExpiry`: reviewed future timestamp for the restricted Location key
+- `ContactResearchEnabled`: leave `false` until the Brave subscription, storage rights, secret value, and live checks have been reviewed
+- `OfficialDomainExceptions`: reviewed comma-separated exact HTTPS host exceptions; leave empty for `.gov`-only research
 
 `AuthAudience` defaults to `neighborhood-fixer-api`, and `SharedWorkspaceId` defaults to `demo-borough-v1`. Do not pass a Clerk secret key to Lambda, Runtime, Vite, or stack outputs. The frontend needs only the publishable key.
 
-Leave `FrontendOrigin` empty to derive `https://main.<Amplify DefaultDomain>`. For a custom domain, supply its exact HTTPS origin without a trailing slash. API CORS, backend authorized-party validation, and the Location key referrer must use the same origin. Health and explicit OPTIONS routes are public; private API routes require `nf:resident`. CORS permits Authorization, Content-Type, and Idempotency-Key.
+Leave `FrontendOrigin` empty to derive `https://main.<Amplify DefaultDomain>`. For a custom domain, supply its exact HTTPS origin without a trailing slash. API CORS, backend authorized-party validation, the audio service's in-function Clerk checks, and the Location key referrer must use the same origin. Health and explicit OPTIONS routes are public; private main API routes require `nf:resident`. The audio REST API exposes only GET/OPTIONS under `/api/{proxy+}` and accepts only Authorization and X-NF-Playback-Token. Its Lambda verifies the Clerk signature, issuer, audience, expiry, authorized party, scope, session, workspace, and owner before Polly runs.
 
 The current development Clerk instance has public signup enabled, its allowlist restriction disabled, zero allowlist entries, and zero retained users after QA cleanup. Use disposable testing identities for future smoke runs and delete them afterward. Create a Clerk production instance and an owned custom domain before treating this as a production resident service.
 
@@ -92,14 +95,18 @@ npx cdk deploy NeighborhoodFixer \
   --parameters ClerkPublishableKey="$NF_CLERK_PUBLISHABLE_KEY" \
   --parameters DataGeneration=clerk-public-v1 \
   --parameters MapKeyExpiry=REVIEWED_FUTURE_ISO_TIMESTAMP \
+  --parameters ContactResearchEnabled=false \
+  --parameters OfficialDomainExceptions= \
   --outputs-file ../../.local/aws-outputs.json
 ```
 
-Keep both asset environment variables set together for synth, diff, and deploy. The application stack contains the HTTP API, three Lambda entrypoints, two private DynamoDB tables, versioned evidence S3, a Standard workflow, AgentCore Runtime and Browser, scoped IAM, logs, Amplify, and Amazon Location. The final template contains no Cognito resources. Runtime invokes AWS services with IAM; the worker and fictional portal fetch only their portal service secret into memory.
+The first deployment creates `BraveSearchSecret` without exposing a key through CloudFormation parameters, outputs, shell history, or frontend configuration. Put the reviewed Brave Web Search API key into that secret through an approved secret-input workflow, then redeploy with `ContactResearchEnabled=true`. Only the isolated contact-research worker role can read the secret. If the subscribed plan does not permit retaining the selected derived contact/source metadata, leave the feature disabled.
+
+Keep both asset environment variables set together for synth, diff, and deploy. The application stack contains the main HTTP API, a separate response-streaming REST API, five Lambda entrypoints, two retained DynamoDB tables, one encrypted TTL-backed no-PITR outreach table, versioned evidence S3, a Standard workflow, AgentCore Runtime and Browser, scoped IAM, logs, Amplify, Amazon Location, and Polly synthesis permission. The transient table holds the 24-hour unselected-candidate cache and short-lived captions; only the selected contact/source snapshot enters retained case storage. The workflow waits until each run's recorded transcript-expiry timestamp and then actively deletes abandoned caption sessions with bounded retries; table TTL remains a 15-minute fallback. The final template contains no Cognito, email-delivery, or telephony resources. Runtime invokes AWS services with IAM; only the isolated contact-research worker can fetch the Brave key, the fictional portal can fetch only its own portal secret, and only the audio Lambda can invoke Polly. The audio Lambda has retained/transient DynamoDB access but no Brave, portal, evidence, AgentCore, browser, state-machine, or worker-invocation access.
 
 ## Build and publish the frontend
 
-Public frontend settings are the Clerk publishable key, API origin, AWS region, and Amazon Location map settings. Retrieve the map-only key privately; never print or commit it. Build the deployable ZIP from current stack outputs:
+Public frontend settings are the Clerk publishable key, main API origin, dedicated audio REST API stage URL, AWS region, and Amazon Location map settings. Retrieve the map-only key privately; never print or commit it. `AudioApiUrl` must be present in the stack outputs; the builder injects it as `VITE_AUDIO_API_BASE_URL`. Build the deployable ZIP from current stack outputs:
 
 ```sh
 cd ../..
@@ -131,6 +138,8 @@ A release acceptance run must also prove:
 - idempotent replay without a second quota charge;
 - report quota exhaustion at 10/10;
 - a clean post-reset sample and a fresh public signup.
+
+When contact research is enabled, additionally prove one owner-confirmed Seattle reverse geocode, one Brave request containing only the normalized jurisdiction and category, manual selection with no default, an internal email receipt marked `SIMULATED_NOT_SENT`, and a captioned Polly call marked `SIMULATED_NOT_DIALED`. Inspect the retained table, temporary table, S3, logs, and network calls afterward: no raw Brave response, audio, expired transcript, real email delivery, or dial attempt may remain.
 
 AgentCore Browser readiness does not prove navigation. Require a successful CDP connection, page action, receipt, and downstream state before reporting remote submission as verified. The current deployment has not met this gate.
 

@@ -21,7 +21,7 @@ def invoke(action, arguments, principal):
         "bedrock-agentcore",
         region_name=os.environ.get("AWS_REGION"),
         config=Config(
-            connect_timeout=5, read_timeout=250, retries={"total_max_attempts": 1}
+            connect_timeout=5, read_timeout=90, retries={"total_max_attempts": 1}
         ),
     )
     response = client.invoke_agent_runtime(
@@ -66,3 +66,7 @@ def route(observation, principal):
 
 def prepare(incident, routing, principal):
     return invoke("prepare", {"incident": incident, "routing": routing}, principal)
+
+
+def simulate_voice(envelope, principal):
+    return invoke("simulate_voice", {"envelope": envelope}, principal)

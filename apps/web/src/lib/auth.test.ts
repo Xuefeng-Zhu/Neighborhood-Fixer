@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApiClient } from './api';
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
 describe('Clerk token transport', () => {
   it('awaits the current token for every request instead of caching credentials', async () => {
     const getToken = vi
@@ -71,6 +74,35 @@ describe('Clerk token transport', () => {
           call[1].headers.get('Authorization') === 'Bearer current-token',
       ),
     ).toBe(true);
+  });
+  it('uses the dedicated audio origin and never falls back to the deployed main API', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(Uint8Array.from([1]), {
+        headers: { 'Content-Type': 'audio/mpeg' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubEnv('VITE_API_BASE_URL', 'https://main-api.example');
+    vi.stubEnv('VITE_AUDIO_API_BASE_URL', 'https://audio-api.example/');
+    const api = createApiClient({ getToken: async () => 'current-token' });
+    await api.audioStream('/incidents/case/turn/audio', {
+      headers: { 'X-NF-Playback-Token': 'header-capability' },
+    });
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'https://audio-api.example/api/incidents/case/turn/audio',
+    );
+    expect(fetchMock.mock.calls[0][1].headers.get('X-NF-Playback-Token')).toBe(
+      'header-capability',
+    );
+    expect(fetchMock.mock.calls[0][1].headers.get('Authorization')).toBe(
+      'Bearer current-token',
+    );
+
+    vi.stubEnv('VITE_AUDIO_API_BASE_URL', '');
+    await expect(api.audioStream('/incidents/case/turn/audio')).rejects.toThrow(
+      'streaming service is not configured',
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
   it('does not retry an authenticated write after an HTTP failure', async () => {
     const fetchMock = vi
