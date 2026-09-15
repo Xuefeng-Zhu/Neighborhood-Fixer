@@ -1,4 +1,4 @@
-import { apiUrl } from './auth';
+import { apiUrl, audioApiUrl } from './auth';
 import type { components } from './generated-api';
 export type Category = components['schemas']['Category'];
 export type ObservationRequest = components['schemas']['ObservationInput'];
@@ -79,6 +79,31 @@ export interface Activity {
   sources?: unknown[];
   agent?: string;
 }
+// Outreach records use the generated server contract directly. This keeps
+// nullable fields, lifecycle states, and fixed simulator targets exact.
+export type JurisdictionCandidate =
+  components['schemas']['JurisdictionCandidate'];
+export type OfficialContact = components['schemas']['OfficialContact'];
+export type ContactResearch = components['schemas']['ContactResearch'];
+export type ContactSelection = components['schemas']['ContactSelection'];
+export type OutreachDraft = components['schemas']['OutreachDraft'];
+export type VoiceFact = components['schemas']['VoiceFact'];
+export type VoiceEnvelope = components['schemas']['VoiceEnvelope'];
+export type VoiceTurn = components['schemas']['VoiceTurn'];
+export type VoiceRun = components['schemas']['VoiceRun'];
+export type SimulationReceipt = components['schemas']['SimulationReceipt'];
+export type OutreachSnapshot = components['schemas']['OutreachSnapshot'];
+export type OutreachApproval = components['schemas']['OutreachApproval'];
+export type ContactResearchInput =
+  components['schemas']['ContactResearchInput'];
+export type ContactSelectionInput =
+  components['schemas']['ContactSelectionInput'];
+export type OutreachEmailDraftInput =
+  components['schemas']['OutreachEmailDraftInput'];
+export type OutreachApprovalInput =
+  components['schemas']['OutreachApprovalInput'];
+export type VoiceApprovalInput = components['schemas']['VoiceApprovalInput'];
+export type VoiceEndInput = components['schemas']['VoiceEndInput'];
 export interface Routing {
   recipient?: string;
   status?: string;
@@ -191,7 +216,11 @@ export function createApiClient(
 ) {
   let lifetime = new AbortController();
   const uploadKeys = new Map<string, string>();
-  async function response(path: string, init: RequestInit = {}) {
+  async function response(
+    path: string,
+    init: RequestInit = {},
+    destination: 'api' | 'audio' = 'api',
+  ) {
     if (!path.startsWith('/') || path.startsWith('//'))
       throw new Error('API requests must use a relative API path.');
     const signal = init.signal
@@ -211,12 +240,17 @@ export function createApiClient(
     // Callers cannot override the current authenticated principal.
     headers.delete('Authorization');
     if (token) headers.set('Authorization', `Bearer ${token}`);
-    const result = await fetch(apiUrl(path), {
-      ...init,
-      credentials: options.getToken ? 'omit' : options.credentials || 'include',
-      headers,
-      signal,
-    });
+    const result = await fetch(
+      destination === 'audio' ? audioApiUrl(path) : apiUrl(path),
+      {
+        ...init,
+        credentials: options.getToken
+          ? 'omit'
+          : options.credentials || 'include',
+        headers,
+        signal,
+      },
+    );
     signal.throwIfAborted();
     if (!result.ok) {
       let body;
@@ -245,6 +279,125 @@ export function createApiClient(
   }
   const post = <T>(path: string, body: unknown = {}, init: RequestInit = {}) =>
     request<T>(path, { ...init, method: 'POST', body: JSON.stringify(body) });
+  const segment = (value: string) => encodeURIComponent(value);
+  const idempotency = (key: string) => ({
+    headers: { 'Idempotency-Key': key },
+  });
+  const outreach = {
+    snapshot(incidentId: string, init: RequestInit = {}) {
+      return request<OutreachSnapshot>(
+        `/incidents/${segment(incidentId)}/outreach`,
+        init,
+      );
+    },
+    previewJurisdiction(incidentId: string, key: string) {
+      return post<JurisdictionCandidate>(
+        `/incidents/${segment(incidentId)}/jurisdiction-preview`,
+        {},
+        idempotency(key),
+      );
+    },
+    researchContacts(
+      incidentId: string,
+      data: ContactResearchInput,
+      key: string,
+    ) {
+      return post<ContactResearch>(
+        `/incidents/${segment(incidentId)}/contact-research`,
+        data,
+        idempotency(key),
+      );
+    },
+    selectContact(
+      incidentId: string,
+      data: ContactSelectionInput,
+      key: string,
+    ) {
+      return post<ContactSelection>(
+        `/incidents/${segment(incidentId)}/contact-selection`,
+        data,
+        idempotency(key),
+      );
+    },
+    draftEmail(incidentId: string, data: OutreachEmailDraftInput, key: string) {
+      return post<OutreachDraft>(
+        `/incidents/${segment(incidentId)}/outreach/email/draft`,
+        data,
+        idempotency(key),
+      );
+    },
+    approveEmail(incidentId: string, data: OutreachApprovalInput, key: string) {
+      return post<OutreachApproval>(
+        `/incidents/${segment(incidentId)}/outreach/email/approve`,
+        data,
+        idempotency(key),
+      );
+    },
+    runEmail(incidentId: string, data: OutreachApprovalInput, key: string) {
+      return post<SimulationReceipt>(
+        `/incidents/${segment(incidentId)}/outreach/email/run`,
+        data,
+        idempotency(key),
+      );
+    },
+    draftVoice(incidentId: string, key: string) {
+      return post<VoiceEnvelope>(
+        `/incidents/${segment(incidentId)}/outreach/voice/envelope`,
+        {},
+        idempotency(key),
+      );
+    },
+    approveVoice(incidentId: string, data: VoiceApprovalInput, key: string) {
+      return post<OutreachApproval>(
+        `/incidents/${segment(incidentId)}/outreach/voice/approve`,
+        data,
+        idempotency(key),
+      );
+    },
+    runVoice(incidentId: string, data: VoiceApprovalInput, key: string) {
+      return post<VoiceRun>(
+        `/incidents/${segment(incidentId)}/outreach/voice/run`,
+        data,
+        idempotency(key),
+      );
+    },
+    endVoice(
+      incidentId: string,
+      runId: string,
+      data: VoiceEndInput,
+      key: string,
+      init: RequestInit = {},
+    ) {
+      return post<SimulationReceipt>(
+        `/incidents/${segment(incidentId)}/outreach/voice/runs/${segment(runId)}/end`,
+        data,
+        {
+          ...init,
+          headers: {
+            ...Object.fromEntries(new Headers(init.headers)),
+            'Idempotency-Key': key,
+          },
+        },
+      );
+    },
+    voiceStatus(
+      incidentId: string,
+      runId: string,
+      playbackToken: string,
+      init: RequestInit = {},
+    ) {
+      return request<VoiceRun>(
+        `/incidents/${segment(incidentId)}/outreach/voice/runs/${segment(runId)}`,
+        {
+          ...init,
+          headers: {
+            ...Object.fromEntries(new Headers(init.headers)),
+            'X-NF-Playback-Token': playbackToken,
+          },
+        },
+      );
+    },
+  };
   async function upload(file: File, idempotencyKey?: string) {
     if (!idempotencyKey) {
       const digest = await crypto.subtle.digest(
@@ -268,9 +421,16 @@ export function createApiClient(
   return {
     request,
     post,
+    outreach,
     upload,
     async evidence(path: string, signal?: AbortSignal) {
       return (await response(path, { signal })).blob();
+    },
+    async blob(path: string, init: RequestInit = {}) {
+      return (await response(path, init)).blob();
+    },
+    async audioStream(path: string, init: RequestInit = {}) {
+      return response(path, init, 'audio');
     },
     dispose() {
       lifetime.abort();

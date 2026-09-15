@@ -7,6 +7,7 @@ import {
   aws_iam as iam,
   aws_lambda as lambda,
   aws_logs as logs,
+  aws_apigateway as rest,
   aws_apigatewayv2 as apigw,
   aws_apigatewayv2_integrations as integrations,
   aws_apigatewayv2_authorizers as authorizers,
@@ -73,6 +74,18 @@ export class NeighborhoodFixerStack extends cdk.Stack {
     const workspaceReports = quota('WorkspaceReportsPerDay', 100, 1000);
     const workspaceUploads = quota('WorkspaceUploadsPerDay', 250, 1000);
     const workspaceReasoning = quota('WorkspaceReasoningJobsPerDay', 300, 1000);
+    const contactResearch = quota('ContactResearchPerDay', 10, 100);
+    const workspaceContactResearch = quota(
+      'WorkspaceContactResearchPerDay',
+      100,
+      1000,
+    );
+    const voiceSimulations = quota('VoiceSimulationsPerDay', 3, 30);
+    const workspaceVoiceSimulations = quota(
+      'WorkspaceVoiceSimulationsPerDay',
+      30,
+      300,
+    );
     const apiRate = quota('ApiRequestsPerSecond', 10, 100);
     const apiBurst = quota('ApiBurstLimit', 20, 200);
     const hosting = new amplify.CfnApp(this, 'Hosting', {
@@ -94,7 +107,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         clerkIssuer.valueAsString,
         " https://challenges.cloudflare.com; connect-src 'self' ",
         clerkIssuer.valueAsString,
-        ` https://*.execute-api.${this.region}.amazonaws.com https://maps.geo.${this.region}.amazonaws.com https://challenges.cloudflare.com; img-src 'self' data: blob: https://img.clerk.com https://images.clerk.dev; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; frame-src `,
+        ` https://*.execute-api.${this.region}.amazonaws.com https://maps.geo.${this.region}.amazonaws.com https://challenges.cloudflare.com; img-src 'self' data: blob: https://img.clerk.com https://images.clerk.dev; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; worker-src 'self' blob:; frame-src `,
         clerkIssuer.valueAsString,
         " https://challenges.cloudflare.com; form-action 'self'; upgrade-insecure-requests\"\n",
       ]),
@@ -149,6 +162,29 @@ export class NeighborhoodFixerStack extends cdk.Stack {
           'Explicit opt-in for secret-authenticated fictional ticket status changes in AWS demo mode only',
       },
     );
+    const contactResearchEnabled = new cdk.CfnParameter(
+      this,
+      'ContactResearchEnabled',
+      {
+        type: 'String',
+        default: 'false',
+        allowedValues: ['true', 'false'],
+        description:
+          'Enable Seattle-only official-contact research after the Brave secret and storage terms have been reviewed',
+      },
+    );
+    const officialDomainExceptions = new cdk.CfnParameter(
+      this,
+      'OfficialDomainExceptions',
+      {
+        type: 'String',
+        default: '',
+        allowedPattern:
+          '^$|[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?(?:,[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)*$',
+        description:
+          'Reviewed comma-separated exact HTTPS host exceptions; empty keeps research restricted to .gov',
+      },
+    );
     const mapKeyExpiry = new cdk.CfnParameter(this, 'MapKeyExpiry', {
       type: 'String',
       default: '2027-09-13T00:00:00Z',
@@ -178,6 +214,15 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
+    const voiceTranscripts = new ddb.Table(this, 'VoiceTranscripts', {
+      timeToLiveAttribute: 'expires_epoch',
+      partitionKey: { name: 'pk', type: ddb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: ddb.AttributeType.STRING },
+      billingMode: ddb.BillingMode.PAY_PER_REQUEST,
+      encryption: ddb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: false },
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
     const portalRecords = new ddb.Table(this, 'PortalRecords', {
       partitionKey: { name: 'pk', type: ddb.AttributeType.STRING },
       sortKey: { name: 'sk', type: ddb.AttributeType.STRING },
@@ -188,6 +233,10 @@ export class NeighborhoodFixerStack extends cdk.Stack {
     });
     const secret = new secrets.Secret(this, 'PortalSecret', {
       generateSecretString: { passwordLength: 48, excludePunctuation: true },
+    });
+    const braveSearchSecret = new secrets.Secret(this, 'BraveSearchSecret', {
+      description:
+        'Neighborhood Fixer Brave Search API key. Set SecretString to the reviewed API key before enabling contact research.',
     });
     const common = {
       NF_MODE: 'aws',
@@ -209,6 +258,14 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       NF_WORKSPACE_REPORTS_PER_DAY: workspaceReports.valueAsString,
       NF_WORKSPACE_UPLOADS_PER_DAY: workspaceUploads.valueAsString,
       NF_WORKSPACE_REASONING_JOBS_PER_DAY: workspaceReasoning.valueAsString,
+      NF_CONTACT_RESEARCH_ENABLED: contactResearchEnabled.valueAsString,
+      NF_OFFICIAL_DOMAIN_EXCEPTIONS: officialDomainExceptions.valueAsString,
+      NF_CONTACT_RESEARCH_DAILY_LIMIT: contactResearch.valueAsString,
+      NF_WORKSPACE_CONTACT_RESEARCH_DAILY_LIMIT:
+        workspaceContactResearch.valueAsString,
+      NF_VOICE_SIMULATION_DAILY_LIMIT: voiceSimulations.valueAsString,
+      NF_WORKSPACE_VOICE_SIMULATION_DAILY_LIMIT:
+        workspaceVoiceSimulations.valueAsString,
     };
     const log = (name: string) =>
       new logs.LogGroup(this, name, {
@@ -294,6 +351,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
     });
     const runtimeLogs = log('RuntimeLogs');
     runtimeLogs.grantWrite(runtimeRole);
+    const foundation = `arn:${this.partition}:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0`;
     runtimeRole.addToPolicy(
       new iam.PolicyStatement({
         actions: [
@@ -352,7 +410,6 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         ],
       }),
     );
-    const foundation = `arn:${this.partition}:bedrock:*::foundation-model/amazon.nova-2-lite-v1:0`;
     runtimeRole.addToPolicy(
       new iam.PolicyStatement({
         actions: [
@@ -431,6 +488,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         NF_AGENTCORE_BROWSER_ID: browser.attrBrowserId,
         NF_STATE_MACHINE_ARN: workflowArn,
         NF_BEDROCK_MODEL_ID: modelId.valueAsString,
+        NF_VOICE_TRANSCRIPTS_TABLE: voiceTranscripts.tableName,
         NF_WORKER_LEASE_SECONDS: '360',
         NF_STATUS_INTERVAL_SECONDS: '60',
         NF_MAX_STATUS_CHECKS: '12',
@@ -447,7 +505,12 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         cdk.Aws.NO_VALUE,
       ),
     );
+    worker.configureAsyncInvoke({
+      retryAttempts: 0,
+      maxEventAge: cdk.Duration.minutes(5),
+    });
     records.grantReadWriteData(worker);
+    voiceTranscripts.grantReadWriteData(worker);
     evidence.grantReadWrite(worker);
     secret.grantRead(worker);
     worker.addToRolePolicy(
@@ -459,6 +522,31 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         ],
       }),
     );
+    const contactResearchWorker = makeLambda(
+      'ContactResearchWorker',
+      'services.agents.aws_workflow.research_handler',
+      {
+        NF_MODE: 'aws',
+        NF_ENVIRONMENT: 'demo',
+        NF_TABLE_NAME: records.tableName,
+        NF_DATA_DIR: '/tmp/neighborhood-fixer',
+        NF_AUTH_PROVIDER: 'clerk',
+        NF_SHARED_WORKSPACE_ID: sharedWorkspace.valueAsString,
+        NF_DATA_GENERATION: generation.valueAsString,
+        NF_CONTACT_RESEARCH_ENABLED: contactResearchEnabled.valueAsString,
+        NF_OFFICIAL_DOMAIN_EXCEPTIONS: officialDomainExceptions.valueAsString,
+        NF_BRAVE_SEARCH_SECRET_ARN: braveSearchSecret.secretArn,
+        NF_VOICE_TRANSCRIPTS_TABLE: voiceTranscripts.tableName,
+      },
+      90,
+    );
+    contactResearchWorker.configureAsyncInvoke({
+      retryAttempts: 0,
+      maxEventAge: cdk.Duration.minutes(5),
+    });
+    records.grantReadWriteData(contactResearchWorker);
+    voiceTranscripts.grantReadWriteData(contactResearchWorker);
+    braveSearchSecret.grantRead(contactResearchWorker);
     worker.addToRolePolicy(
       new iam.PolicyStatement({
         actions: [
@@ -470,6 +558,40 @@ export class NeighborhoodFixerStack extends cdk.Stack {
         resources: [browser.attrBrowserArn],
       }),
     );
+    const cleanupDone = new sfn.Succeed(this, 'VoiceTranscriptCleanupFinished');
+    const cleanupFailed = new sfn.Fail(this, 'VoiceTranscriptCleanupFailed', {
+      cause: 'Transient voice-session deletion exhausted bounded retries',
+    });
+    const cleanupVoice = new tasks.LambdaInvoke(
+      this,
+      'DeleteTransientVoiceSession',
+      {
+        lambdaFunction: worker,
+        payload: sfn.TaskInput.fromObject({
+          phase: 'voice_cleanup',
+          'workspace_id.$': '$.workspace_id',
+          'run_id.$': '$.run_id',
+          'expires_at.$': '$.expires_at',
+        }),
+        payloadResponseOnly: true,
+        resultPath: sfn.JsonPath.DISCARD,
+        retryOnServiceExceptions: false,
+        taskTimeout: sfn.Timeout.duration(cdk.Duration.seconds(30)),
+      },
+    );
+    cleanupVoice.addRetry({
+      errors: ['States.ALL'],
+      interval: cdk.Duration.seconds(10),
+      maxAttempts: 3,
+      backoffRate: 2,
+    });
+    cleanupVoice.addCatch(cleanupFailed, {
+      resultPath: sfn.JsonPath.DISCARD,
+    });
+    const cleanupWait = new sfn.Wait(this, 'WaitForTransientVoiceExpiry', {
+      time: sfn.WaitTime.timestampPath('$.expires_at'),
+    });
+    cleanupWait.next(cleanupVoice).next(cleanupDone);
     const finish = new sfn.Succeed(this, 'Finished');
     const fail = new sfn.Fail(this, 'NeedsReview', {
       cause:
@@ -533,10 +655,16 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       )
       .when(sfn.Condition.booleanEquals('$.result.has_next_job', true), wait)
       .otherwise(finish);
+    const entry = new sfn.Choice(this, 'SelectWorkflowKind')
+      .when(
+        sfn.Condition.stringEquals('$.phase', 'voice_cleanup_wait'),
+        cleanupWait,
+      )
+      .otherwise(run);
     const workflow = new sfn.StateMachine(this, 'Workflow', {
       stateMachineName: workflowName,
       stateMachineType: sfn.StateMachineType.STANDARD,
-      definitionBody: sfn.DefinitionBody.fromChainable(run),
+      definitionBody: sfn.DefinitionBody.fromChainable(entry),
       timeout: cdk.Duration.days(2),
       logs: {
         destination: log('WorkflowLogs'),
@@ -567,9 +695,15 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       NF_AGENTCORE_RUNTIME_ARN: runtime.attrAgentRuntimeArn,
       NF_AGENTCORE_BROWSER_ID: browser.attrBrowserId,
       NF_BEDROCK_MODEL_ID: modelId.valueAsString,
+      NF_OUTREACH_PROVIDER_FUNCTION: worker.functionName,
+      NF_CONTACT_RESEARCH_FUNCTION: contactResearchWorker.functionName,
+      NF_VOICE_TRANSCRIPTS_TABLE: voiceTranscripts.tableName,
       NF_SECRET_BOOTSTRAP: '1',
     });
     records.grantReadWriteData(api);
+    voiceTranscripts.grantReadWriteData(api);
+    worker.grantInvoke(api);
+    contactResearchWorker.grantInvoke(api);
     evidence.grantReadWrite(api);
     workflow.grantStartExecution(api);
     api.addToRolePolicy(
@@ -587,7 +721,12 @@ export class NeighborhoodFixerStack extends cdk.Stack {
           apigw.CorsHttpMethod.PATCH,
           apigw.CorsHttpMethod.OPTIONS,
         ],
-        allowHeaders: ['authorization', 'content-type', 'idempotency-key'],
+        allowHeaders: [
+          'authorization',
+          'content-type',
+          'idempotency-key',
+          'x-nf-playback-token',
+        ],
         allowCredentials: true,
       },
     });
@@ -625,6 +764,102 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       throttlingRateLimit: apiRate.valueAsNumber,
       throttlingBurstLimit: apiBurst.valueAsNumber,
     };
+    const audio = new lambda.DockerImageFunction(this, 'Audio', {
+      code: lambda.DockerImageCode.fromImageAsset(root, {
+        file: 'infra/cdk/Dockerfile.audio',
+        cmd: [
+          'uvicorn',
+          'services.audio.main:app',
+          '--host',
+          '0.0.0.0',
+          '--port',
+          '8080',
+          '--no-access-log',
+        ],
+        platform: assets.Platform.LINUX_ARM64,
+        ignoreMode: cdk.IgnoreMode.DOCKER,
+        exclude: [
+          '.git',
+          '.venv',
+          'node_modules',
+          'infra/cdk/node_modules',
+          'infra/cdk/cdk.out',
+          '.local',
+          'apps/web/dist',
+          '.env',
+          '**/.env*',
+          '.codex',
+          '.agents',
+          '**/node_modules',
+          '**/cdk.out',
+        ],
+      }),
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 1024,
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        NF_MODE: 'aws',
+        NF_ENVIRONMENT: 'demo',
+        NF_AUDIO_STREAMING_SERVICE: '1',
+        NF_TABLE_NAME: records.tableName,
+        NF_VOICE_TRANSCRIPTS_TABLE: voiceTranscripts.tableName,
+        NF_DATA_DIR: '/tmp/neighborhood-fixer',
+        NF_ALLOWED_ORIGINS: frontendOrigin,
+        NF_AUTH_PROVIDER: 'clerk',
+        NF_CLERK_ISSUER: clerkIssuer.valueAsString,
+        NF_AUTH_AUDIENCE: audience.valueAsString,
+        NF_AUTHORIZED_PARTIES: frontendOrigin,
+        NF_SHARED_WORKSPACE_ID: sharedWorkspace.valueAsString,
+        NF_DATA_GENERATION: generation.valueAsString,
+        NF_CONTACT_RESEARCH_ENABLED: contactResearchEnabled.valueAsString,
+        AWS_LWA_PORT: '8080',
+        AWS_LWA_INVOKE_MODE: 'RESPONSE_STREAM',
+        AWS_LWA_READINESS_CHECK_PATH: '/healthz',
+        AWS_LWA_ASYNC_INIT: 'true',
+      },
+      logGroup: log('AudioLogs'),
+      tracing: lambda.Tracing.ACTIVE,
+    });
+    records.grantReadWriteData(audio);
+    voiceTranscripts.grantReadWriteData(audio);
+    audio.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['polly:SynthesizeSpeech'],
+        resources: ['*'],
+      }),
+    );
+    const audioApi = new rest.RestApi(this, 'AudioApi', {
+      restApiName: 'Neighborhood Fixer transient audio',
+      endpointTypes: [rest.EndpointType.REGIONAL],
+      deployOptions: {
+        stageName: 'audio',
+        loggingLevel: rest.MethodLoggingLevel.OFF,
+        dataTraceEnabled: false,
+        metricsEnabled: true,
+        throttlingRateLimit: apiRate.valueAsNumber,
+        throttlingBurstLimit: apiBurst.valueAsNumber,
+      },
+      defaultCorsPreflightOptions: {
+        allowOrigins: [frontendOrigin],
+        allowMethods: ['GET', 'OPTIONS'],
+        allowHeaders: ['Authorization', 'X-NF-Playback-Token'],
+        allowCredentials: false,
+        maxAge: cdk.Duration.minutes(5),
+      },
+    });
+    const audioIntegration = new rest.LambdaIntegration(audio, {
+      proxy: true,
+      allowTestInvoke: false,
+      responseTransferMode: rest.ResponseTransferMode.STREAM,
+      timeout: cdk.Duration.seconds(29),
+    });
+    const audioProxy = audioApi.root.addResource('api').addProxy({
+      anyMethod: false,
+    });
+    audioProxy.addMethod('GET', audioIntegration, {
+      authorizationType: rest.AuthorizationType.NONE,
+      apiKeyRequired: false,
+    });
     const map = new location.CfnMap(this, 'NeighborhoodMap', {
       mapName: 'NeighborhoodFixer',
       configuration: { style: 'VectorEsriLightGrayCanvas' },
@@ -653,6 +888,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       stage: 'DEVELOPMENT',
       environmentVariables: [
         { name: 'VITE_API_BASE_URL', value: http.apiEndpoint },
+        { name: 'VITE_AUDIO_API_BASE_URL', value: audioApi.url },
         { name: 'VITE_AWS_REGION', value: this.region },
         { name: 'VITE_CLERK_PUBLISHABLE_KEY', value: clerkKey.valueAsString },
         { name: 'VITE_LOCATION_MAP_NAME', value: map.ref },
@@ -661,8 +897,11 @@ export class NeighborhoodFixerStack extends cdk.Stack {
     for (const [name, value] of Object.entries({
       WebUrl: frontendOrigin,
       ApiUrl: http.apiEndpoint,
+      AudioApiUrl: audioApi.url,
       PortalUrl: portalUrl.url,
       PortalSecretArn: secret.secretArn,
+      BraveSearchSecretArn: braveSearchSecret.secretArn,
+      ContactResearchEnabled: contactResearchEnabled.valueAsString,
       PortalStatusManagementEnabled: demoStatusManagement.valueAsString,
       ClerkIssuerUrl: clerkIssuer.valueAsString,
       ClerkPublishableKey: clerkKey.valueAsString,
@@ -671,6 +910,7 @@ export class NeighborhoodFixerStack extends cdk.Stack {
       DataGeneration: generation.valueAsString,
       EvidenceBucket: evidence.bucketName,
       RecordsTable: records.tableName,
+      VoiceTranscriptsTable: voiceTranscripts.tableName,
       PortalRecordsTable: portalRecords.tableName,
       WorkflowArn: workflow.stateMachineArn,
       AgentRuntimeArn: runtime.attrAgentRuntimeArn,

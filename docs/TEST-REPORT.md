@@ -2,6 +2,25 @@
 
 Verification date: **2026-09-14 UTC**. All reports, residents, photos, and tickets used during validation were fictional. The deployed application is available at [main.d12il66dljooo6.amplifyapp.com](https://main.d12il66dljooo6.amplifyapp.com/), backed by [the us-west-2 API](https://09iviho9v3.execute-api.us-west-2.amazonaws.com).
 
+## Official contact research and simulated outreach — current branch
+
+The current branch adds the owner-initiated Seattle contact-research workflow and the internal email and voice simulators. Local development exercises the complete authorization and activity flow with labeled deterministic fixtures. Every execution target remains internal: the email simulator sends no message and the voice simulator dials no number. This branch has not been deployed; the public URL above remains on the preceding release.
+
+| Check | Result | What it establishes |
+|---|---|---|
+| Python pytest suite | 245 passed, 4 explicitly skipped live-AWS tests, 3 dependency warnings | Research, selection, approval, privacy, idempotency, expiry, validation, transient cleanup, provider failure, and audio authorization behavior |
+| Frontend Vitest | 54 passed | Typed API integration, truthful fixture/provider labels, manual contact selection, approval revisions, voice controls, captions, reload, and failure states |
+| Local Playwright | 2 passed | Complete desktop workflow through manual contact selection, simulated email receipt, captioned voice simulation and cleanup, plus mobile map and draft persistence |
+| Live bounded Seattle.gov extraction | Passed | The pinned-IP, suffix-range fetcher read exactly 256 KB from the current SDOT contact page and extracted its shared department email and phone without production hard-coding |
+| CDK assertions | 18 passed | Disabled-by-default feature gating, encrypted TTL storage, scoped Brave secret access, Location and Polly permissions, streaming audio API, and absence of outbound email or telephony resources |
+| Web typecheck and production build | Passed | Generated API types and the production frontend compile |
+| CDK build and synthesis | Passed | Infrastructure code compiles and the feature resources synthesize with the intended IAM and response-streaming configuration |
+| OpenAPI semantic parity | Passed | The checked-in OpenAPI document matches the FastAPI application schema |
+| Generated client parity | Passed | A fresh TypeScript client generation matches the checked-in client byte for byte |
+| Frozen audio dependency export | Passed | The dedicated audio Lambda dependency set resolves from the lockfile |
+
+Live Brave search, Amazon Location reverse geocoding, Bedrock role execution, Polly synthesis, and hosted progressive audio streaming have not been run for this branch. The audio container image was not built locally because no Docker daemon was available; frozen dependency export and CDK asset synthesis passed. `ContactResearchEnabled` remains false until a Brave key is configured, the subscription's selected-contact storage terms are approved, IAM is reviewed in the target account, and the live acceptance checks pass. No live email or call test is expected because real delivery and dialing are intentionally absent from this feature.
+
 ## Release results
 
 | Check | Result | What it establishes |

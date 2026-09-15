@@ -226,6 +226,227 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/incidents/{incident_id}/outreach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Outreach Snapshot */
+        get: operations["outreach_snapshot_api_incidents__incident_id__outreach_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/jurisdiction-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Jurisdiction Preview */
+        post: operations["jurisdiction_preview_api_incidents__incident_id__jurisdiction_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/contact-research": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Contact Research */
+        post: operations["contact_research_api_incidents__incident_id__contact_research_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/contact-selection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Contact Selection */
+        post: operations["contact_selection_api_incidents__incident_id__contact_selection_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/outreach/email/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Outreach Email Draft */
+        post: operations["outreach_email_draft_api_incidents__incident_id__outreach_email_draft_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/outreach/email/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Outreach Email Approve */
+        post: operations["outreach_email_approve_api_incidents__incident_id__outreach_email_approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/outreach/email/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Outreach Email Run */
+        post: operations["outreach_email_run_api_incidents__incident_id__outreach_email_run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/outreach/voice/envelope": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Outreach Voice Envelope */
+        post: operations["outreach_voice_envelope_api_incidents__incident_id__outreach_voice_envelope_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/outreach/voice/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Outreach Voice Approve */
+        post: operations["outreach_voice_approve_api_incidents__incident_id__outreach_voice_approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/outreach/voice/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Outreach Voice Run */
+        post: operations["outreach_voice_run_api_incidents__incident_id__outreach_voice_run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/outreach/voice/runs/{run_id}/end": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Outreach Voice End */
+        post: operations["outreach_voice_end_api_incidents__incident_id__outreach_voice_runs__run_id__end_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/outreach/voice/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Outreach Voice Status */
+        get: operations["outreach_voice_status_api_incidents__incident_id__outreach_voice_runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/incidents/{incident_id}/outreach/voice/runs/{run_id}/turns/{turn_id}/audio": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Outreach Voice Audio */
+        get: operations["outreach_voice_audio_api_incidents__incident_id__outreach_voice_runs__run_id__turns__turn_id__audio_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/incidents/{incident_id}/draft": {
         parameters: {
             query?: never;
@@ -569,6 +790,87 @@ export interface components {
              */
             phone: string;
         };
+        /** ContactResearch */
+        ContactResearch: {
+            /** Id */
+            id: string;
+            /** Incident Id */
+            incident_id: string;
+            /** Candidate Id */
+            candidate_id: string;
+            /** Context Hash */
+            context_hash: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "PENDING" | "READY" | "FAILED" | "STALE" | "EXPIRED";
+            query_scope: components["schemas"]["ContactResearchScope"];
+            /** Contacts */
+            contacts: components["schemas"]["OfficialContact"][];
+            /** Provider */
+            provider: string;
+            /** Selected Contact Id */
+            selected_contact_id?: string | null;
+            /** Created At */
+            created_at: string;
+            /** Expires At */
+            expires_at: string;
+        };
+        /** ContactResearchInput */
+        ContactResearchInput: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Context Hash */
+            context_hash: string;
+            /**
+             * Confirmed
+             * @constant
+             */
+            confirmed: true;
+            /**
+             * Refresh
+             * @default false
+             */
+            refresh: boolean;
+        };
+        /** ContactResearchScope */
+        ContactResearchScope: {
+            /**
+             * Jurisdiction
+             * @constant
+             */
+            jurisdiction: "Seattle, WA";
+            category: components["schemas"]["Category"];
+        };
+        /** ContactSelection */
+        ContactSelection: {
+            /** Id */
+            id: string;
+            /** Incident Id */
+            incident_id: string;
+            /** Research Id */
+            research_id: string;
+            /** Contact Id */
+            contact_id: string;
+            contact: components["schemas"]["OfficialContact"];
+            /** Context Hash */
+            context_hash: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "SELECTED" | "STALE";
+            /** Selected At */
+            selected_at: string;
+        };
+        /** ContactSelectionInput */
+        ContactSelectionInput: {
+            /** Research Id */
+            research_id: string;
+            /** Contact Id */
+            contact_id: string;
+        };
         /** DraftInput */
         DraftInput: {
             /** Description */
@@ -660,6 +962,40 @@ export interface components {
             next_action?: string | null;
         } & {
             [key: string]: unknown;
+        };
+        /** JurisdictionCandidate */
+        JurisdictionCandidate: {
+            /** Id */
+            id: string;
+            /** Incident Id */
+            incident_id: string;
+            /** Display Name */
+            display_name: string;
+            /** Locality */
+            locality: string;
+            /** Municipality */
+            municipality: string;
+            /** Region */
+            region: string;
+            /** Country Code */
+            country_code: string;
+            /** Label */
+            label: string;
+            /** Supported */
+            supported: boolean;
+            /** Provider */
+            provider: string;
+            /** Context Hash */
+            context_hash: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "AWAITING_CONFIRMATION" | "CONFIRMED" | "STALE" | "EXPIRED";
+            /** Created At */
+            created_at: string;
+            /** Expires At */
+            expires_at: string;
         };
         /** Observation */
         Observation: {
@@ -772,10 +1108,124 @@ export interface components {
             /** Evidence Ids */
             evidence_ids?: string[] | null;
         };
+        /** OfficialContact */
+        OfficialContact: {
+            /** Id */
+            id: string;
+            /** Agency */
+            agency: string;
+            /** Role */
+            role: string;
+            /** Email */
+            email?: string | null;
+            /** Phone */
+            phone?: string | null;
+            /** Source Title */
+            source_title: string;
+            /** Source Url */
+            source_url: string;
+            /** Source Hostname */
+            source_hostname: string;
+            /** Match Reason */
+            match_reason: string;
+            /** Retrieved At */
+            retrieved_at: string;
+        };
         /** OperationResponse */
         OperationResponse: {
             /** Operation Id */
             operation_id: string;
+        };
+        /** OutreachApproval */
+        OutreachApproval: {
+            /** Id */
+            id: string;
+            /** Incident Id */
+            incident_id: string;
+            /** Record Id */
+            record_id: string;
+            /** Payload Hash */
+            payload_hash: string;
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "simulate_email" | "simulate_voice";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "APPROVED" | "STALE";
+            /** Created At */
+            created_at: string;
+            /** Expires At */
+            expires_at: string;
+        };
+        /** OutreachApprovalInput */
+        OutreachApprovalInput: {
+            /** Draft Id */
+            draft_id: string;
+            /** Payload Hash */
+            payload_hash: string;
+        };
+        /** OutreachDraft */
+        OutreachDraft: {
+            /** Id */
+            id: string;
+            /** Incident Id */
+            incident_id: string;
+            /**
+             * Channel
+             * @constant
+             */
+            channel: "email";
+            /** Revision */
+            revision: number;
+            /** Subject */
+            subject: string;
+            /** Body */
+            body: string;
+            research_reference: components["schemas"]["OfficialContact"];
+            selected_contact?: components["schemas"]["OfficialContact"] | null;
+            /** Research Snapshot Id */
+            research_snapshot_id: string;
+            /**
+             * Execution Target
+             * @constant
+             */
+            execution_target: "internal-email-simulator-v1";
+            /** Context Hash */
+            context_hash: string;
+            /** Payload Hash */
+            payload_hash: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "AWAITING_APPROVAL" | "APPROVED" | "STALE" | "SIMULATED_NOT_SENT";
+            /** Created At */
+            created_at: string;
+            /** Expires At */
+            expires_at: string;
+        };
+        /** OutreachEmailDraftInput */
+        OutreachEmailDraftInput: Record<string, never>;
+        /** OutreachSnapshot */
+        OutreachSnapshot: {
+            /** Available */
+            available: boolean;
+            /** Disabled Reason */
+            disabled_reason?: string | null;
+            /** Voice Available */
+            voice_available: boolean;
+            jurisdiction?: components["schemas"]["JurisdictionCandidate"] | null;
+            research?: components["schemas"]["ContactResearch"] | null;
+            selection?: components["schemas"]["ContactSelection"] | null;
+            email_draft?: components["schemas"]["OutreachDraft"] | null;
+            email_receipt?: components["schemas"]["SimulationReceipt"] | null;
+            voice_envelope?: components["schemas"]["VoiceEnvelope"] | null;
+            voice_run?: components["schemas"]["VoiceRun"] | null;
+            voice_receipt?: components["schemas"]["SimulationReceipt"] | null;
         };
         /** QuotaSnapshot */
         QuotaSnapshot: {
@@ -827,6 +1277,44 @@ export interface components {
             /** Generation */
             generation?: string | null;
             quotas?: components["schemas"]["QuotaSnapshot"] | null;
+        };
+        /** SimulationReceipt */
+        SimulationReceipt: {
+            /** Id */
+            id: string;
+            /** Incident Id */
+            incident_id: string;
+            /**
+             * Channel
+             * @enum {string}
+             */
+            channel: "email" | "voice";
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "SIMULATED_NOT_SENT" | "SIMULATED_NOT_DIALED";
+            /**
+             * Execution Target
+             * @enum {string}
+             */
+            execution_target: "internal-email-simulator-v1" | "internal-voice-simulator-v1";
+            /** Payload Hash */
+            payload_hash: string;
+            /** Summary */
+            summary: string;
+            /** Subject */
+            subject?: string | null;
+            /** Duration Seconds */
+            duration_seconds?: number | null;
+            /** Turn Count */
+            turn_count?: number | null;
+            /** Run Status */
+            run_status?: ("COMPLETED" | "ENDED" | "INTERRUPTED") | null;
+            /** Research Snapshot Id */
+            research_snapshot_id: string;
+            /** Created At */
+            created_at: string;
         };
         /** SubmissionDraft */
         SubmissionDraft: {
@@ -919,6 +1407,142 @@ export interface components {
              * @default
              */
             note: string;
+        };
+        /** VoiceApprovalInput */
+        VoiceApprovalInput: {
+            /** Envelope Id */
+            envelope_id: string;
+            /** Payload Hash */
+            payload_hash: string;
+        };
+        /** VoiceEndInput */
+        VoiceEndInput: {
+            /**
+             * Reason
+             * @default resident
+             * @enum {string}
+             */
+            reason: "completed" | "resident";
+        };
+        /** VoiceEnvelope */
+        VoiceEnvelope: {
+            /** Id */
+            id: string;
+            /** Incident Id */
+            incident_id: string;
+            /** Revision */
+            revision: number;
+            /** Facts */
+            facts: components["schemas"]["VoiceFact"][];
+            /** Allowed Intents */
+            allowed_intents: {
+                [key: string]: string[];
+            };
+            /** Refusal Rules */
+            refusal_rules: string[];
+            /**
+             * Max Turns
+             * @constant
+             */
+            max_turns: 6;
+            /**
+             * Max Duration Seconds
+             * @constant
+             */
+            max_duration_seconds: 90;
+            research_reference: components["schemas"]["OfficialContact"];
+            selected_contact?: components["schemas"]["OfficialContact"] | null;
+            /** Research Snapshot Id */
+            research_snapshot_id: string;
+            /**
+             * Execution Target
+             * @constant
+             */
+            execution_target: "internal-voice-simulator-v1";
+            /** Context Hash */
+            context_hash: string;
+            /** Payload Hash */
+            payload_hash: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "AWAITING_APPROVAL" | "APPROVED" | "GENERATING" | "RUNNING" | "FAILED" | "STALE";
+            /** Variability Notice */
+            variability_notice: string;
+            /** Created At */
+            created_at: string;
+            /** Expires At */
+            expires_at: string;
+        };
+        /** VoiceFact */
+        VoiceFact: {
+            /**
+             * Id
+             * @enum {string}
+             */
+            id: "category" | "description" | "location" | "jurisdiction";
+            /** Label */
+            label: string;
+            /** Value */
+            value: string;
+        };
+        /** VoiceRun */
+        VoiceRun: {
+            /** Id */
+            id: string;
+            /** Incident Id */
+            incident_id: string;
+            /** Envelope Id */
+            envelope_id: string;
+            /** Payload Hash */
+            payload_hash: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "GENERATING" | "RUNNING" | "FAILED" | "COMPLETED" | "ENDED" | "INTERRUPTED" | "STALE" | "EXPIRED";
+            /**
+             * Execution Target
+             * @constant
+             */
+            execution_target: "internal-voice-simulator-v1";
+            /** Created At */
+            created_at: string;
+            /** Ready At */
+            ready_at?: string | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Transcript Expires At */
+            transcript_expires_at?: string | null;
+            /** Turn Count */
+            turn_count?: number | null;
+            /** Research Snapshot Id */
+            research_snapshot_id: string;
+            /** Playback Token */
+            playback_token?: string | null;
+            /** Turns */
+            turns?: components["schemas"]["VoiceTurn"][] | null;
+        };
+        /** VoiceTurn */
+        VoiceTurn: {
+            /** Id */
+            id: string;
+            /**
+             * Speaker
+             * @enum {string}
+             */
+            speaker: "reporting_agent" | "fictional_intake_agent";
+            /** Intent */
+            intent: string;
+            /** Fact Ids */
+            fact_ids: string[];
+            /** Variant Id */
+            variant_id: string;
+            /** Caption */
+            caption: string;
+            /** Audio Url */
+            audio_url: string;
         };
     };
     responses: never;
@@ -2050,6 +2674,1172 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Incident"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_snapshot_api_incidents__incident_id__outreach_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutreachSnapshot"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    jurisdiction_preview_api_incidents__incident_id__jurisdiction_preview_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JurisdictionCandidate"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    contact_research_api_incidents__incident_id__contact_research_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactResearchInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactResearch"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    contact_selection_api_incidents__incident_id__contact_selection_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContactSelectionInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContactSelection"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_email_draft_api_incidents__incident_id__outreach_email_draft_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OutreachEmailDraftInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutreachDraft"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_email_approve_api_incidents__incident_id__outreach_email_approve_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OutreachApprovalInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutreachApproval"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_email_run_api_incidents__incident_id__outreach_email_run_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OutreachApprovalInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimulationReceipt"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_voice_envelope_api_incidents__incident_id__outreach_voice_envelope_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceEnvelope"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_voice_approve_api_incidents__incident_id__outreach_voice_approve_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VoiceApprovalInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutreachApproval"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_voice_run_api_incidents__incident_id__outreach_voice_run_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VoiceApprovalInput"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceRun"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_voice_end_api_incidents__incident_id__outreach_voice_runs__run_id__end_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                incident_id: string;
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["VoiceEndInput"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SimulationReceipt"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_voice_status_api_incidents__incident_id__outreach_voice_runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-NF-Playback-Token": string;
+            };
+            path: {
+                incident_id: string;
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceRun"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Too Many Requests */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    outreach_voice_audio_api_incidents__incident_id__outreach_voice_runs__run_id__turns__turn_id__audio_get: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-NF-Playback-Token": string;
+            };
+            path: {
+                incident_id: string;
+                run_id: string;
+                turn_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Transient synthesized turn audio */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "audio/mpeg": string;
+                    "audio/wav": string;
                 };
             };
             /** @description Bad Request */

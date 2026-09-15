@@ -3,7 +3,8 @@
 Required: --outputs <CDK outputs.json or AWS describe-stacks.json>, AWS_REGION,
 and NF_LOCATION_API_KEY in private environment (a referrer-restricted PUBLIC map key).
 Use --stack to select one stack when the file contains several. Outputs must contain
-WebUrl, ApiUrl, ClerkIssuerUrl, ClerkPublishableKey, AuthAudience, and LocationMapName.
+WebUrl, ApiUrl, AudioApiUrl, ClerkIssuerUrl, ClerkPublishableKey, AuthAudience,
+and LocationMapName.
 --web-origin may override WebUrl only after the same origin is registered in Clerk,
 the backend authorized-party allowlist, API CORS, and the
 Location key restriction. --install runs npm ci first; otherwise use installed pinned
@@ -83,11 +84,34 @@ def origin(value, name):
         raise BuildError(f"{name} must be a deployed HTTPS origin.") from None
 
 
+def deployed_base_url(value, name):
+    """Validate a public HTTPS API base while preserving a safe stage path."""
+    try:
+        url = urlparse(value)
+        segments = [segment for segment in url.path.split("/") if segment]
+        if (
+            url.scheme != "https"
+            or not url.hostname
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or url.hostname in ("localhost", "127.0.0.1", "::1")
+            or not re.fullmatch(r"(?:/[A-Za-z0-9._~-]+)*/?", url.path)
+            or any(segment in (".", "..") for segment in segments)
+        ):
+            raise ValueError()
+        return f"https://{url.netloc}{url.path}".rstrip("/")
+    except (ValueError, TypeError, AttributeError):
+        raise BuildError(f"{name} must be a deployed HTTPS API base URL.") from None
+
+
 def frontend_environment(outputs, env, web_origin=None):
     values = {}
     for key in (
         "WebUrl",
         "ApiUrl",
+        "AudioApiUrl",
         "ClerkIssuerUrl",
         "ClerkPublishableKey",
         "AuthAudience",
@@ -129,6 +153,9 @@ def frontend_environment(outputs, env, web_origin=None):
     origin(values["WebUrl"], "WebUrl")
     return {
         "VITE_API_BASE_URL": origin(values["ApiUrl"], "ApiUrl"),
+        "VITE_AUDIO_API_BASE_URL": deployed_base_url(
+            values["AudioApiUrl"], "AudioApiUrl"
+        ),
         "VITE_AWS_REGION": region,
         "VITE_CLERK_PUBLISHABLE_KEY": clerk_key,
         "VITE_LOCATION_MAP_NAME": values["LocationMapName"],
@@ -223,6 +250,7 @@ def main(argv=None):
             "frontend": {
                 "web_url": origin(args.web_origin or outputs["WebUrl"], "WebUrl"),
                 "api_url": frontend["VITE_API_BASE_URL"],
+                "audio_api_url": frontend["VITE_AUDIO_API_BASE_URL"],
                 "aws_region": frontend["VITE_AWS_REGION"],
                 "clerk_issuer": origin(outputs["ClerkIssuerUrl"], "ClerkIssuerUrl"),
                 "clerk_publishable_key": frontend["VITE_CLERK_PUBLISHABLE_KEY"],

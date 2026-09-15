@@ -1,20 +1,20 @@
 """Shared deterministic authorization and state machine; models never authorize writes."""
 
-from datetime import datetime, timezone
 import asyncio
 import hashlib
 import json
 import math
-from pathlib import Path
 import secrets
 import time
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 
-from .config import Settings
-from .store import create_store
-from .models import Observation, Analysis, Approval, SubmissionAttempt
 from . import fixtures
+from .config import Settings
+from .models import Analysis, Approval, Observation, SubmissionAttempt
 from .policy import Policy
+from .store import create_store
 
 CATEGORY_TITLES = {
     "damaged_sidewalk": "Damaged sidewalk or curb ramp",
@@ -22,6 +22,9 @@ CATEGORY_TITLES = {
     "walkway_obstruction": "Walkway obstruction",
 }
 RESERVED = {"IN_FLIGHT", "RECEIPT_CONFIRMED", "OUTCOME_UNKNOWN"}
+OUTREACH_RESEARCH_SECONDS = 24 * 60 * 60
+OUTREACH_CANDIDATE_SECONDS = 15 * 60
+VOICE_SESSION_SECONDS = 10 * 60
 
 
 class DomainError(Exception):
@@ -841,6 +844,2317 @@ class Domain(Policy):
     def draft_projection(self, draft):
         return {k: v for k, v in draft.items() if k not in ("workspace_id", "owner_id")}
 
+    def outreach_context(self, incident):
+        return digest(
+            {
+                "incident_id": incident["id"],
+                "category": incident["category"],
+                "description": incident["description"],
+                "latitude": incident["latitude"],
+                "longitude": incident["longitude"],
+                "location_label": incident["location_label"],
+            }
+        )
+
+    def outreach_eligibility(self, tx, incident):
+        if incident.get("is_sample") or incident.get("seeded"):
+            return False, "Illustrative samples cannot run contact research."
+        observation = self.require(tx, "observation", incident["observation_ids"][0])
+        if not observation.get("location_confirmed"):
+            return False, "Confirm this case location before researching a contact."
+        if observation.get("asset_public") != "yes":
+            return (
+                False,
+                "Confirm this is a public street or walkway before researching a government contact.",
+            )
+        if not observation.get("analysis"):
+            return False, "Complete the case analysis before researching a contact."
+        return True, None
+
+    @staticmethod
+    def outreach_projection(record):
+        if not record:
+            return None
+        return {
+            key: value
+            for key, value in record.items()
+            if key
+            not in (
+                "workspace_id",
+                "owner_id",
+                "approver_id",
+                "expires_epoch",
+                "provider_deadline_at",
+                "started_epoch",
+                "playback_token_hash",
+                "playback_token_hashes",
+                "provider_claim_id",
+                "provider_claimed_at",
+                "request_id",
+            )
+        }
+
+    def attach_playback_token(self, tx, principal, run):
+        if run.get("owner_id") != principal["user"]["id"]:
+            raise DomainError(
+                "FORBIDDEN", "Only the reporting resident can play this demo.", 403
+            )
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        hashes = list(run.get("playback_token_hashes", []))
+        legacy = run.pop("playback_token_hash", None)
+        if legacy and legacy not in hashes:
+            hashes.append(legacy)
+        hashes.append(token_hash)
+        run["playback_token_hashes"] = hashes[-3:]
+        tx.put("voice_run", run["id"], run)
+        return {**self.outreach_projection(run), "playback_token": token}
+
+    @staticmethod
+    def require_playback_token(run, token):
+        presented = hashlib.sha256((token or "").encode()).hexdigest()
+        hashes = list(run.get("playback_token_hashes", []))
+        if run.get("playback_token_hash"):
+            hashes.append(run["playback_token_hash"])
+        valid = any(secrets.compare_digest(presented, item) for item in hashes)
+        if not token or len(token) > 128 or not valid:
+            raise DomainError(
+                "VOICE_PLAYBACK_CAPABILITY_REQUIRED",
+                "This temporary playback capability is missing or invalid.",
+                403,
+            )
+
+    def _mark_record_stale(self, tx, kind, record_id):
+        record = tx.get(kind, record_id or "")
+        if record and record.get("status") not in (
+            "COMPLETED",
+            "SIMULATED_NOT_SENT",
+            "SIMULATED_NOT_DIALED",
+            "ENDED",
+        ):
+            record["status"] = "STALE"
+            tx.put(kind, record["id"], record)
+            approval = tx.get("outreach_approval", record.get("approval_id", ""))
+            if approval:
+                approval["status"] = "STALE"
+                tx.put("outreach_approval", approval["id"], approval)
+
+    def ensure_no_active_voice_run(self, tx, incident):
+        run = tx.get("voice_run", incident.get("outreach_voice_run_id", ""))
+        if run and run.get("status") in ("GENERATING", "RUNNING"):
+            raise DomainError(
+                "VOICE_SIMULATION_ACTIVE",
+                "End the current internal voice simulation before changing its research reference.",
+                409,
+            )
+
+    def invalidate_outreach(self, tx, incident, *, selection=False):
+        self.ensure_no_active_voice_run(tx, incident)
+        self._mark_record_stale(
+            tx, "outreach_email_draft", incident.get("outreach_email_draft_id")
+        )
+        self._mark_record_stale(
+            tx, "voice_envelope", incident.get("outreach_voice_envelope_id")
+        )
+        if selection:
+            selected = tx.get(
+                "contact_selection", incident.get("outreach_contact_selection_id", "")
+            )
+            if selected:
+                selected["status"] = "STALE"
+                tx.put("contact_selection", selected["id"], selected)
+            incident.pop("outreach_contact_selection_id", None)
+        incident.pop("outreach_email_draft_id", None)
+        incident.pop("outreach_voice_envelope_id", None)
+
+    def scrub_contact_research(self, tx, research_id, status="STALE"):
+        research = tx.get("contact_research", research_id or "")
+        if not research:
+            return
+        research.pop("contacts", None)
+        research.update(status=status, expires_epoch=int(self.now(tx)))
+        tx.put("contact_research", research["id"], research)
+        self._purge_contact_candidates(tx, research["id"])
+
+    def _contact_candidates(self, tx, research):
+        from . import outreach
+
+        contacts = outreach.get_contact_candidates(
+            self.settings,
+            self.store,
+            tx.workspace_id,
+            research["id"],
+        )
+        return contacts if isinstance(contacts, list) else []
+
+    def _purge_contact_candidates(self, tx, research_id):
+        from . import outreach
+
+        if not research_id:
+            return
+        outreach.delete_contact_candidates(
+            self.settings, self.store, tx.workspace_id, research_id
+        )
+
+    def _put_contact_candidates(self, tx, research, contacts):
+        from . import outreach
+
+        outreach.put_contact_candidates(
+            self.settings,
+            self.store,
+            tx.workspace_id,
+            research["id"],
+            contacts,
+            int(research["expires_epoch"]),
+        )
+
+    def contact_research_projection(self, tx, research, selection=None):
+        result = self.outreach_projection(research)
+        contacts = []
+        if research and research.get("status") == "READY":
+            contacts = self._contact_candidates(tx, research)
+            if not contacts and selection and selection.get("status") == "SELECTED":
+                contacts = [selection["contact"]]
+        result["contacts"] = contacts
+        return result
+
+    def scrub_voice_outcome(self, tx, incident, run, status):
+        envelope = tx.get("voice_envelope", run.get("envelope_id", ""))
+        if envelope:
+            request = tx.get("outreach_request", envelope.get("request_id", ""))
+            if request:
+                request["status"] = "ERASED"
+                tx.put("outreach_request", request["id"], request)
+            envelope = {
+                key: envelope[key]
+                for key in (
+                    "id",
+                    "incident_id",
+                    "owner_id",
+                    "revision",
+                    "payload_hash",
+                    "execution_target",
+                    "created_at",
+                )
+                if key in envelope
+            }
+            envelope["status"] = status
+            tx.put("voice_envelope", envelope["id"], envelope)
+            if incident.get("outreach_voice_envelope_id") == envelope["id"]:
+                incident.pop("outreach_voice_envelope_id", None)
+        run["status"] = status
+        for key in (
+            "playback_token",
+            "playback_token_hash",
+            "playback_token_hashes",
+            "provider_claim_id",
+            "provider_claimed_at",
+            "provider_deadline_at",
+            "started_epoch",
+            "started_at",
+            "transcript_expires_at",
+            "played_turn_ids",
+            "turns",
+            "transcript",
+            "captions",
+            "audio",
+            "facts",
+            "research_reference",
+            "selected_contact",
+            "allowed_intents",
+            "refusal_rules",
+        ):
+            run.pop(key, None)
+        tx.put("voice_run", run["id"], run)
+        tx.put("incident", incident["id"], incident)
+
+    def reconcile_outreach_context(self, principal, incident_id):
+        with self.authorized(principal) as tx:
+            incident = self.require(tx, "incident", incident_id)
+            self.owner(incident, principal)
+            current_hash = self.outreach_context(incident)
+            candidate = tx.get(
+                "jurisdiction_candidate",
+                incident.get("outreach_jurisdiction_id", ""),
+            )
+            research = tx.get(
+                "contact_research",
+                incident.get("outreach_contact_research_id", ""),
+            )
+            research_expired = bool(
+                research
+                and research.get("status") == "READY"
+                and epoch(research["expires_at"]) <= self.now(tx)
+            )
+            stale = bool(
+                (candidate and candidate.get("context_hash") != current_hash)
+                or (research and research.get("context_hash") != current_hash)
+                or research_expired
+            )
+            if not stale:
+                return None
+            run = tx.get("voice_run", incident.get("outreach_voice_run_id", ""))
+            if run and run.get("status") in ("GENERATING", "RUNNING"):
+                return run["id"]
+            if candidate and candidate.get("status") not in ("STALE", "EXPIRED"):
+                candidate["status"] = "STALE"
+                tx.put("jurisdiction_candidate", candidate["id"], candidate)
+            if research:
+                self.scrub_contact_research(
+                    tx,
+                    research["id"],
+                    "EXPIRED" if research_expired else "STALE",
+                )
+            self.invalidate_outreach(tx, incident, selection=True)
+            tx.put("incident", incident["id"], incident)
+            return None
+
+    def reconcile_outreach_boundary(self, principal, incident_id):
+        """Persist stale/expired invalidation before a protected action runs."""
+
+        with self.authorized(principal) as tx:
+            incident = self.require(tx, "incident", incident_id)
+            self.owner(incident, principal)
+            current_hash = self.outreach_context(incident)
+            candidate = tx.get(
+                "jurisdiction_candidate",
+                incident.get("outreach_jurisdiction_id", ""),
+            )
+            research = tx.get(
+                "contact_research",
+                incident.get("outreach_contact_research_id", ""),
+            )
+            invalid = bool(
+                (candidate and candidate.get("context_hash") != current_hash)
+                or (research and research.get("context_hash") != current_hash)
+                or (
+                    research
+                    and research.get("status") == "READY"
+                    and epoch(research["expires_at"]) <= self.now(tx)
+                )
+            )
+        active_run_id = self.reconcile_outreach_context(principal, incident_id)
+        if active_run_id:
+            self.end_voice_simulation(principal, incident_id, active_run_id, "stale")
+            self.reconcile_outreach_context(principal, incident_id)
+            raise DomainError(
+                "STALE_OUTREACH_CONTEXT",
+                "Case facts or contact research changed, so the internal simulation ended.",
+                409,
+            )
+        if invalid:
+            raise DomainError(
+                "STALE_OUTREACH_CONTEXT",
+                "Case facts or contact research changed. Review fresh contact results.",
+                409,
+            )
+
+    def consume_outreach_quota(self, tx, principal, kind):
+        now = datetime.fromtimestamp(self.now(tx), timezone.utc)
+        day = now.strftime("%Y-%m-%d")
+        resident_id = f"{principal['user']['id']}:{day}"
+        workspace_id = f"workspace:{day}"
+        limits = {
+            "research": (
+                self.settings.contact_research_daily_limit,
+                self.settings.workspace_contact_research_daily_limit,
+            ),
+            "voice": (
+                self.settings.voice_simulation_daily_limit,
+                self.settings.workspace_voice_simulation_daily_limit,
+            ),
+        }[kind]
+        for key, limit, scope in (
+            (resident_id, limits[0], "resident"),
+            (workspace_id, limits[1], "workspace"),
+        ):
+            row = tx.get("outreach_quota", key) or {
+                "day": day,
+                "research": 0,
+                "voice": 0,
+            }
+            if row[kind] >= limit:
+                subject = "Your" if scope == "resident" else "The workspace's"
+                error = DomainError(
+                    "OUTREACH_DAILY_LIMIT_REACHED",
+                    f"{subject} daily {kind} simulation limit has been reached.",
+                    429,
+                    True,
+                )
+                error.details = {
+                    "resource": kind,
+                    "scope": scope,
+                    "limit": limit,
+                    "remaining": 0,
+                    "reset_at": iso((int(now.timestamp()) // 86400 + 1) * 86400),
+                }
+                raise error
+        for key in (resident_id, workspace_id):
+            row = tx.get("outreach_quota", key) or {
+                "day": day,
+                "research": 0,
+                "voice": 0,
+            }
+            row[kind] += 1
+            tx.put("outreach_quota", key, row)
+
+    def _require_outreach(self):
+        if not self.settings.outreach_enabled:
+            raise DomainError(
+                "CONTACT_RESEARCH_DISABLED",
+                "Official contact research is not enabled for this deployment.",
+                503,
+            )
+
+    def begin_outreach_request(self, tx, principal, action, incident_id, key, payload):
+        if not key:
+            if self.settings.mode == "aws":
+                raise DomainError(
+                    "IDEMPOTENCY_KEY_REQUIRED",
+                    "Provide a UUID Idempotency-Key for this outreach action.",
+                    400,
+                )
+            return None, None
+        try:
+            normalized = str(uuid.UUID(key))
+            if normalized != key.lower():
+                raise ValueError()
+        except (ValueError, AttributeError):
+            raise DomainError(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "Provide a canonical UUID Idempotency-Key for this outreach action.",
+                400,
+            ) from None
+        request_id = digest([principal["user"]["id"], action, incident_id, normalized])
+        body_hash = digest(
+            {"action": action, "incident_id": incident_id, "payload": payload}
+        )
+        current = tx.get("outreach_request", request_id)
+        if current and current.get("expires_epoch", 0) <= self.now(tx):
+            current = None
+        if current and current["body_hash"] != body_hash:
+            raise DomainError(
+                "IDEMPOTENCY_CONFLICT",
+                "This request key was already used with different content.",
+                409,
+            )
+        if current and current.get("status") == "ERASED":
+            raise DomainError(
+                "OUTREACH_REVISION_ERASED",
+                "That private simulation revision was erased after completion.",
+                409,
+            )
+        if current and current.get("status") == "COMPLETED":
+            target = tx.get(current["target_kind"], current["target_id"])
+            if target and target.get("status") != "FAILED":
+                projection = (
+                    self.contact_research_projection(tx, target)
+                    if current["target_kind"] == "contact_research"
+                    else self.outreach_projection(target)
+                )
+                return request_id, projection
+            current["status"] = "FAILED"
+            tx.put("outreach_request", request_id, current)
+        if current and current.get("status") == "RESERVED":
+            raise DomainError(
+                "OUTREACH_REQUEST_PENDING",
+                "This outreach action is still pending. Retry with the same request key.",
+                409,
+                True,
+            )
+        tx.put(
+            "outreach_request",
+            request_id,
+            {
+                "body_hash": body_hash,
+                "status": "RESERVED",
+                "action": action,
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "created_at": iso(self.now(tx)),
+                "expires_epoch": int(self.now(tx) + 24 * 60 * 60),
+            },
+        )
+        return request_id, None
+
+    def finish_outreach_request(self, tx, request_id, target_kind, target_id):
+        if not request_id:
+            return
+        request = self.require(tx, "outreach_request", request_id)
+        request.update(status="COMPLETED", target_kind=target_kind, target_id=target_id)
+        tx.put("outreach_request", request_id, request)
+
+    def fail_outreach_request(self, principal, request_id):
+        if not request_id:
+            return
+        with self.authorized(principal) as tx:
+            request = tx.get("outreach_request", request_id)
+            if request and request.get("status") in ("RESERVED", "COMPLETED"):
+                request["status"] = "FAILED"
+                tx.put("outreach_request", request_id, request)
+
+    def jurisdiction_preview(self, principal, incident_id, idempotency_key=None):
+        self._require_outreach()
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            self.ensure_no_active_voice_run(tx, inc)
+            available, reason = self.outreach_eligibility(tx, inc)
+            if not available:
+                raise DomainError("CONTACT_RESEARCH_UNAVAILABLE", reason, 409)
+            context_hash = self.outreach_context(inc)
+            request_id, replay = self.begin_outreach_request(
+                tx,
+                principal,
+                "jurisdiction_preview",
+                incident_id,
+                idempotency_key,
+                {"context_hash": context_hash},
+            )
+            if replay:
+                return replay
+            current = tx.get(
+                "jurisdiction_candidate", inc.get("outreach_jurisdiction_id", "")
+            )
+            if (
+                current
+                and current.get("context_hash") == context_hash
+                and current.get("status") == "PENDING"
+                and epoch(current["provider_deadline_at"]) > self.now(tx)
+            ):
+                raise DomainError(
+                    "JURISDICTION_LOOKUP_PENDING",
+                    "The current jurisdiction check is still pending.",
+                    409,
+                    True,
+                )
+            if (
+                current
+                and current.get("context_hash") == context_hash
+                and current.get("status") in ("AWAITING_CONFIRMATION", "CONFIRMED")
+                and epoch(current["expires_at"]) > self.now(tx)
+            ):
+                self.finish_outreach_request(
+                    tx, request_id, "jurisdiction_candidate", current["id"]
+                )
+                return self.outreach_projection(current)
+            if current:
+                current["status"] = "STALE"
+                tx.put("jurisdiction_candidate", current["id"], current)
+                self.invalidate_outreach(tx, inc, selection=True)
+                self.scrub_contact_research(
+                    tx, inc.get("outreach_contact_research_id"), "STALE"
+                )
+            now = self.now(tx)
+            candidate = {
+                "id": ident(),
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "context_hash": context_hash,
+                "status": "PENDING",
+                "created_at": iso(now),
+                "expires_at": iso(now + OUTREACH_CANDIDATE_SECONDS),
+                "provider_deadline_at": iso(now + 30),
+            }
+            inc["outreach_jurisdiction_id"] = candidate["id"]
+            tx.put("jurisdiction_candidate", candidate["id"], candidate)
+            tx.put("incident", incident_id, inc)
+            latitude, longitude = inc["latitude"], inc["longitude"]
+        from . import outreach
+
+        try:
+            proposed = outreach.reverse_geocode(self.settings, latitude, longitude)
+        except outreach.OutreachProviderError as exc:
+            with self.authorized(principal) as tx:
+                failed = tx.get("jurisdiction_candidate", candidate["id"])
+                if failed and failed.get("status") == "PENDING":
+                    failed["status"] = "FAILED"
+                    tx.put("jurisdiction_candidate", failed["id"], failed)
+            self.fail_outreach_request(principal, request_id)
+            raise DomainError(exc.code, exc.message, 503, exc.retryable) from exc
+        stale = False
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            candidate = self.require(tx, "jurisdiction_candidate", candidate["id"])
+            now = self.now(tx)
+            if (
+                self.outreach_context(inc) != context_hash
+                or inc.get("outreach_jurisdiction_id") != candidate["id"]
+                or candidate.get("status") != "PENDING"
+            ):
+                candidate["status"] = "STALE"
+                tx.put("jurisdiction_candidate", candidate["id"], candidate)
+                stale = True
+            else:
+                candidate.update(
+                    proposed,
+                    status="AWAITING_CONFIRMATION",
+                    expires_at=iso(now + OUTREACH_CANDIDATE_SECONDS),
+                )
+                candidate["label"] = candidate["display_name"]
+                candidate.pop("provider_deadline_at", None)
+                tx.put("jurisdiction_candidate", candidate["id"], candidate)
+                self.finish_outreach_request(
+                    tx, request_id, "jurisdiction_candidate", candidate["id"]
+                )
+                self.event(
+                    tx,
+                    incident_id,
+                    "JURISDICTION_CANDIDATE",
+                    "A government-area candidate is ready for resident confirmation. No contact search occurred.",
+                    tool="research.reverse_geocode",
+                    result=(
+                        "Seattle demo candidate"
+                        if candidate["supported"]
+                        else "Outside Seattle demo"
+                    ),
+                )
+                result = self.outreach_projection(candidate)
+        if stale:
+            self.fail_outreach_request(principal, request_id)
+            raise DomainError(
+                "STALE_JURISDICTION",
+                "The case changed during lookup. Review the current location.",
+                409,
+            )
+        return result
+
+    def contact_research(self, principal, incident_id, data, idempotency_key=None):
+        self._require_outreach()
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            self.ensure_no_active_voice_run(tx, inc)
+            available, reason = self.outreach_eligibility(tx, inc)
+            if not available:
+                raise DomainError("CONTACT_RESEARCH_UNAVAILABLE", reason, 409)
+            candidate = self.require(tx, "jurisdiction_candidate", data["candidate_id"])
+            if candidate.get("status") not in (
+                "AWAITING_CONFIRMATION",
+                "CONFIRMED",
+            ):
+                raise DomainError(
+                    "JURISDICTION_NOT_READY",
+                    "Finish the current jurisdiction check before contact research.",
+                    409,
+                    candidate.get("status") == "PENDING",
+                )
+            if (
+                candidate["incident_id"] != incident_id
+                or inc.get("outreach_jurisdiction_id") != candidate["id"]
+                or candidate["context_hash"] != data["context_hash"]
+                or self.outreach_context(inc) != data["context_hash"]
+            ):
+                raise DomainError(
+                    "STALE_JURISDICTION",
+                    "The location candidate no longer matches this case.",
+                    409,
+                )
+            if epoch(candidate["expires_at"]) <= self.now(tx):
+                raise DomainError(
+                    "JURISDICTION_EXPIRED",
+                    "The location candidate expired. Check the location again.",
+                    409,
+                )
+            if not data.get("confirmed"):
+                raise DomainError(
+                    "JURISDICTION_CONFIRMATION_REQUIRED",
+                    "Confirm the jurisdiction before contact research.",
+                    409,
+                )
+            if not candidate.get("supported"):
+                raise DomainError(
+                    "UNSUPPORTED_JURISDICTION",
+                    "Version one researches Seattle, Washington cases only.",
+                    409,
+                )
+            request_id, replay = self.begin_outreach_request(
+                tx,
+                principal,
+                "contact_research",
+                incident_id,
+                idempotency_key,
+                data,
+            )
+            if replay:
+                return replay
+            existing = tx.get(
+                "contact_research", inc.get("outreach_contact_research_id", "")
+            )
+            if existing and existing["candidate_id"] == candidate["id"]:
+                if (
+                    not data.get("refresh")
+                    and existing["status"] == "READY"
+                    and epoch(existing["expires_at"]) > self.now(tx)
+                ):
+                    self.finish_outreach_request(
+                        tx, request_id, "contact_research", existing["id"]
+                    )
+                    return self.contact_research_projection(tx, existing)
+                if existing["status"] == "PENDING" and epoch(
+                    existing["provider_deadline_at"]
+                ) > self.now(tx):
+                    self.finish_outreach_request(
+                        tx, request_id, "contact_research", existing["id"]
+                    )
+                    return self.contact_research_projection(tx, existing)
+                if existing["status"] == "PENDING":
+                    existing.update(status="FAILED", provider="unavailable")
+                    tx.put("contact_research", existing["id"], existing)
+                    self.event(
+                        tx,
+                        incident_id,
+                        "CONTACT_RESEARCH_FAILED",
+                        "Contact research timed out. No outreach occurred.",
+                    )
+                elif epoch(existing["expires_at"]) <= self.now(tx):
+                    self.scrub_contact_research(tx, existing["id"], "EXPIRED")
+            if existing:
+                self.scrub_contact_research(tx, existing["id"], "STALE")
+            self.consume_outreach_quota(tx, principal, "research")
+            now = self.now(tx)
+            research = {
+                "id": ident(),
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "candidate_id": candidate["id"],
+                "context_hash": candidate["context_hash"],
+                "status": "PENDING",
+                "query_scope": {
+                    "jurisdiction": "Seattle, WA",
+                    "category": inc["category"],
+                },
+                "provider": "pending",
+                "selected_contact_id": None,
+                "created_at": iso(now),
+                "expires_at": iso(now + OUTREACH_RESEARCH_SECONDS),
+                "expires_epoch": int(now + OUTREACH_RESEARCH_SECONDS),
+                "provider_deadline_at": iso(now + 5 * 60),
+            }
+            candidate["status"] = "CONFIRMED"
+            inc["outreach_contact_research_id"] = research["id"]
+            self.invalidate_outreach(tx, inc, selection=True)
+            tx.put("jurisdiction_candidate", candidate["id"], candidate)
+            tx.put("contact_research", research["id"], research)
+            tx.put("incident", incident_id, inc)
+            self.finish_outreach_request(
+                tx, request_id, "contact_research", research["id"]
+            )
+            self.event(
+                tx,
+                incident_id,
+                "JURISDICTION_CONFIRMED",
+                "The reporting resident confirmed the Seattle research area. No outreach occurred.",
+            )
+            category = inc["category"]
+            pending_result = {**self.outreach_projection(research), "contacts": []}
+        from . import outreach
+
+        if self.settings.mode == "aws":
+            try:
+                outreach.dispatch_outreach_worker(
+                    self.settings,
+                    {
+                        "action": "research_contacts",
+                        "workspace_id": principal["workspace_id"],
+                        "research_id": research["id"],
+                    },
+                )
+            except outreach.OutreachProviderError as exc:
+                self.fail_contact_research(principal["workspace_id"], research["id"])
+                self.fail_outreach_request(principal, request_id)
+                raise DomainError(exc.code, exc.message, 503, exc.retryable) from exc
+            return pending_result
+        try:
+            contacts, provider = outreach.research_contacts(self.settings, category)
+        except outreach.OutreachProviderError as exc:
+            self.fail_contact_research(principal["workspace_id"], research["id"])
+            self.fail_outreach_request(principal, request_id)
+            raise DomainError(exc.code, exc.message, 503, exc.retryable) from exc
+        return self.complete_contact_research(
+            principal["workspace_id"], research["id"], contacts, provider
+        )
+
+    def fail_contact_research(self, workspace_id, research_id, claimant_id=None):
+        with self.store.atomic(workspace_id) as tx:
+            self.check_admission(tx)
+            current = tx.get("contact_research", research_id)
+            if not current or current.get("status") != "PENDING":
+                return (
+                    self.contact_research_projection(tx, current) if current else None
+                )
+            if claimant_id and current.get("provider_claim_id") != claimant_id:
+                return self.contact_research_projection(tx, current)
+            current.update(status="FAILED", provider="unavailable")
+            current.pop("contacts", None)
+            current.pop("provider_claim_id", None)
+            current.pop("provider_claimed_at", None)
+            tx.put("contact_research", current["id"], current)
+            self._purge_contact_candidates(tx, current["id"])
+            self.event(
+                tx,
+                current["incident_id"],
+                "CONTACT_RESEARCH_FAILED",
+                "Official contact research failed. No outreach occurred.",
+            )
+            return self.contact_research_projection(tx, current)
+
+    def complete_contact_research(
+        self,
+        workspace_id,
+        research_id,
+        contacts,
+        provider,
+        claimant_id=None,
+    ):
+        from . import outreach
+
+        with self.store.atomic(workspace_id) as tx:
+            self.check_admission(tx)
+            current = self.require(tx, "contact_research", research_id)
+            inc = self.require(tx, "incident", current["incident_id"])
+            if current.get("status") == "READY":
+                selection = tx.get(
+                    "contact_selection",
+                    inc.get("outreach_contact_selection_id", ""),
+                )
+                return self.contact_research_projection(tx, current, selection)
+            if claimant_id and current.get("provider_claim_id") != claimant_id:
+                raise DomainError(
+                    "CONTACT_RESEARCH_CLAIM_LOST",
+                    "Another worker owns this contact research operation.",
+                    409,
+                )
+            if current.get("status") == "PENDING" and self.now(tx) >= epoch(
+                current["provider_deadline_at"]
+            ):
+                current.update(status="FAILED", provider="unavailable")
+                current.pop("contacts", None)
+                tx.put("contact_research", current["id"], current)
+                self._purge_contact_candidates(tx, current["id"])
+                self.event(
+                    tx,
+                    current["incident_id"],
+                    "CONTACT_RESEARCH_FAILED",
+                    "Contact research finished after its deadline and was discarded. No outreach occurred.",
+                )
+                return self.contact_research_projection(tx, current)
+            if (
+                current.get("status") != "PENDING"
+                or inc.get("outreach_contact_research_id") != current["id"]
+                or self.outreach_context(inc) != current["context_hash"]
+            ):
+                if current.get("status") == "PENDING":
+                    current["status"] = "STALE"
+                    tx.put("contact_research", current["id"], current)
+                raise DomainError(
+                    "STALE_CONTACT_RESEARCH",
+                    "The case changed during research. Start a fresh search.",
+                    409,
+                )
+            retrieved = iso(self.now(tx))
+            normalized = []
+            for contact in contacts[:3]:
+                try:
+                    source_url = outreach.validate_official_url(
+                        contact.get("source_url", ""),
+                        self.settings.official_domain_exceptions,
+                        resolve=False,
+                    )
+                except ValueError:
+                    continue
+                validated_channels = set(contact.get("validated_channels") or ())
+                email = (
+                    outreach.normalize_shared_email(contact.get("email") or "")
+                    if "email" in validated_channels
+                    else None
+                )
+                phone = (
+                    outreach.normalize_us_phone(contact.get("phone") or "")
+                    if "phone" in validated_channels
+                    else None
+                )
+                if not email and not phone:
+                    continue
+                item = {
+                    "agency": str(contact.get("agency") or "Government office")[:120],
+                    "role": str(contact.get("role") or "Public contact")[:120],
+                    "email": str(email)[:200] if email else None,
+                    "phone": str(phone)[:50] if phone else None,
+                    "source_title": str(
+                        contact.get("source_title")
+                        or "Official government contact page"
+                    )[:160],
+                    "source_url": source_url,
+                    "source_hostname": outreach._hostname(source_url),
+                    "match_reason": str(
+                        contact.get("match_reason")
+                        or "Validated official government source."
+                    )[:300],
+                    "retrieved_at": retrieved,
+                }
+                item["id"] = digest(
+                    [
+                        current["id"],
+                        item["source_url"],
+                        item["email"],
+                        item["phone"],
+                    ]
+                )[:32]
+                normalized.append(item)
+            current.update(
+                status="READY",
+                contact_result_ids=[item["id"] for item in normalized],
+                contact_count=len(normalized),
+                provider=str(provider)[:120],
+                completed_at=retrieved,
+            )
+            current.pop("contacts", None)
+            current.pop("provider_claim_id", None)
+            current.pop("provider_claimed_at", None)
+            self._put_contact_candidates(tx, current, normalized)
+            tx.put("contact_research", current["id"], current)
+            self.event(
+                tx,
+                current["incident_id"],
+                "CONTACT_RESEARCH_COMPLETED",
+                "Official government contact research completed. No outreach occurred.",
+                tool="research.official_contacts",
+                result=f"{len(normalized)} validated public contact options",
+            )
+            return self.contact_research_projection(tx, current)
+
+    def select_contact(self, principal, incident_id, data, idempotency_key=None):
+        self._require_outreach()
+        self.reconcile_outreach_boundary(principal, incident_id)
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            self.ensure_no_active_voice_run(tx, inc)
+            research = self.require(tx, "contact_research", data["research_id"])
+            if (
+                research["incident_id"] != incident_id
+                or inc.get("outreach_contact_research_id") != research["id"]
+                or research["status"] != "READY"
+                or self.outreach_context(inc) != research["context_hash"]
+            ):
+                raise DomainError(
+                    "STALE_CONTACT_RESEARCH",
+                    "Refresh official contact results before selecting.",
+                    409,
+                )
+            if epoch(research["expires_at"]) <= self.now(tx):
+                raise DomainError(
+                    "CONTACT_RESEARCH_EXPIRED",
+                    "The contact research expired. Run it again before selecting.",
+                    409,
+                )
+            previous = tx.get(
+                "contact_selection", inc.get("outreach_contact_selection_id", "")
+            )
+            candidates = self._contact_candidates(tx, research)
+            if (
+                not candidates
+                and previous
+                and research.get("selected_contact_id") == previous.get("contact_id")
+            ):
+                candidates = [previous["contact"]]
+            contact = next(
+                (item for item in candidates if item["id"] == data["contact_id"]),
+                None,
+            )
+            if not contact:
+                raise DomainError(
+                    "CONTACT_NOT_FOUND",
+                    "Select one of the current official contact results.",
+                    409,
+                )
+            request_id, replay = self.begin_outreach_request(
+                tx,
+                principal,
+                "contact_selection",
+                incident_id,
+                idempotency_key,
+                data,
+            )
+            if replay:
+                self._purge_contact_candidates(tx, research["id"])
+                return replay
+            # The transient candidate set contains unselected public contacts. Purge it
+            # before any selection or idempotency write can commit, so a failed purge
+            # cannot leave a durable selection pointing at a lingering candidate set.
+            self._purge_contact_candidates(tx, research["id"])
+            if previous and previous["contact"]["id"] == contact["id"]:
+                self.finish_outreach_request(
+                    tx, request_id, "contact_selection", previous["id"]
+                )
+                return self.outreach_projection(previous)
+            self.invalidate_outreach(tx, inc)
+            now = self.now(tx)
+            selection = {
+                "id": ident(),
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "research_id": research["id"],
+                "contact_id": contact["id"],
+                "contact": contact,
+                "context_hash": digest(
+                    [research["context_hash"], research["id"], contact["id"]]
+                ),
+                "status": "SELECTED",
+                "selected_at": iso(now),
+            }
+            research["selected_contact_id"] = contact["id"]
+            research.pop("contacts", None)
+            inc["outreach_contact_selection_id"] = selection["id"]
+            tx.put("contact_research", research["id"], research)
+            tx.put("contact_selection", selection["id"], selection)
+            tx.put("incident", incident_id, inc)
+            self.finish_outreach_request(
+                tx, request_id, "contact_selection", selection["id"]
+            )
+            self.event(
+                tx,
+                incident_id,
+                "CONTACT_SELECTED",
+                "The reporting resident selected a research reference. No outreach occurred.",
+            )
+            result = self.outreach_projection(selection)
+        return result
+
+    def _current_selection(self, tx, inc):
+        selection = self.require(
+            tx, "contact_selection", inc.get("outreach_contact_selection_id", "")
+        )
+        if selection.get("status") != "SELECTED":
+            raise DomainError(
+                "CONTACT_SELECTION_REQUIRED",
+                "Select a current contact research result first.",
+                409,
+            )
+        research = self.require(tx, "contact_research", selection["research_id"])
+        expired = epoch(research["expires_at"]) <= self.now(tx)
+        if (
+            research.get("selected_contact_id") != selection["contact"]["id"]
+            or research["status"] != "READY"
+            or expired
+            or self.outreach_context(inc) != research["context_hash"]
+        ):
+            if research.get("status") == "READY":
+                self.scrub_contact_research(
+                    tx, research["id"], "EXPIRED" if expired else "STALE"
+                )
+            self.invalidate_outreach(tx, inc, selection=True)
+            tx.put("incident", inc["id"], inc)
+            raise DomainError(
+                "STALE_CONTACT_SELECTION",
+                "The selected research reference changed or expired.",
+                409,
+            )
+        return selection
+
+    @staticmethod
+    def _frozen_outreach_payload(kind, record):
+        fields = (
+            (
+                "revision",
+                "channel",
+                "subject",
+                "body",
+                "research_reference",
+                "selected_contact",
+                "research_snapshot_id",
+                "execution_target",
+                "context_hash",
+            )
+            if kind == "outreach_email_draft"
+            else (
+                "revision",
+                "facts",
+                "allowed_intents",
+                "refusal_rules",
+                "max_turns",
+                "max_duration_seconds",
+                "research_reference",
+                "selected_contact",
+                "research_snapshot_id",
+                "execution_target",
+                "context_hash",
+            )
+        )
+        return {field: record.get(field) for field in fields}
+
+    def _require_current_outreach_record(self, tx, inc, kind, record):
+        selection = self._current_selection(tx, inc)
+        frozen = self._frozen_outreach_payload(kind, record)
+        if (
+            record.get("research_snapshot_id") != selection["id"]
+            or record.get("context_hash") != selection["context_hash"]
+            or record.get("research_reference") != selection["contact"]
+            or record.get("selected_contact") != selection["contact"]
+            or digest(frozen) != record.get("payload_hash")
+        ):
+            self._mark_record_stale(tx, kind, record.get("id"))
+            pointer = (
+                "outreach_email_draft_id"
+                if kind == "outreach_email_draft"
+                else "outreach_voice_envelope_id"
+            )
+            if inc.get(pointer) == record.get("id"):
+                inc.pop(pointer, None)
+                tx.put("incident", inc["id"], inc)
+            raise DomainError(
+                "STALE_OUTREACH_APPROVAL",
+                "The simulation preview no longer matches current approved case facts.",
+                409,
+            )
+        return selection
+
+    def create_email_draft(self, principal, incident_id, data, idempotency_key=None):
+        self._require_outreach()
+        self.reconcile_outreach_boundary(principal, incident_id)
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            selection = self._current_selection(tx, inc)
+            contact = selection["contact"]
+            if not contact.get("email"):
+                raise DomainError(
+                    "EMAIL_REFERENCE_UNAVAILABLE",
+                    "The selected official source does not publish an email address.",
+                    409,
+                )
+            request_id, replay = self.begin_outreach_request(
+                tx,
+                principal,
+                "email_draft",
+                incident_id,
+                idempotency_key,
+                data,
+            )
+            if replay:
+                return replay
+            previous = tx.get(
+                "outreach_email_draft", inc.get("outreach_email_draft_id", "")
+            )
+            revision = previous["revision"] + 1 if previous else 1
+            subject = f"Neighborhood report: {CATEGORY_TITLES[inc['category']]} at {inc['location_label']}"
+            body = (
+                f"Hello {contact['role']},\n\n"
+                f"A Seattle resident would like to report {CATEGORY_TITLES[inc['category']].lower()} "
+                f"at {inc['location_label']}.\n\n"
+                f"Resident-provided description: {inc['description']}\n\n"
+                "Please advise which official reporting channel would be appropriate."
+            )
+            now = self.now(tx)
+            frozen = {
+                "revision": revision,
+                "channel": "email",
+                "subject": subject,
+                "body": body,
+                "research_reference": contact,
+                "selected_contact": contact,
+                "research_snapshot_id": selection["id"],
+                "execution_target": "internal-email-simulator-v1",
+                "context_hash": selection["context_hash"],
+            }
+            draft = {
+                **frozen,
+                "id": ident(),
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "payload_hash": digest(frozen),
+                "status": "AWAITING_APPROVAL",
+                "created_at": iso(now),
+                "expires_at": iso(now + self.settings.approval_seconds),
+            }
+            self._mark_record_stale(
+                tx, "outreach_email_draft", inc.get("outreach_email_draft_id")
+            )
+            inc["outreach_email_draft_id"] = draft["id"]
+            tx.put("outreach_email_draft", draft["id"], draft)
+            tx.put("incident", incident_id, inc)
+            self.finish_outreach_request(
+                tx, request_id, "outreach_email_draft", draft["id"]
+            )
+            self.event(
+                tx,
+                incident_id,
+                "EMAIL_SIMULATION_DRAFTED",
+                f"Internal email simulation revision {revision} is awaiting approval; nothing was sent.",
+                tool="outreach.prepare_email_draft",
+            )
+            return self.outreach_projection(draft)
+
+    def approve_email_draft(self, principal, incident_id, data, idempotency_key=None):
+        return self._approve_outreach(
+            principal,
+            incident_id,
+            "outreach_email_draft",
+            "outreach_email_draft_id",
+            data["draft_id"],
+            data["payload_hash"],
+            "simulate_email",
+            idempotency_key,
+        )
+
+    def _approve_outreach(
+        self,
+        principal,
+        incident_id,
+        kind,
+        pointer,
+        record_id,
+        payload_hash,
+        action,
+        idempotency_key=None,
+    ):
+        self._require_outreach()
+        self.reconcile_outreach_boundary(principal, incident_id)
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            record = self.require(tx, kind, record_id)
+            if record["incident_id"] != incident_id or inc.get(pointer) != record["id"]:
+                raise DomainError(
+                    "STALE_OUTREACH_APPROVAL",
+                    "The simulation draft changed. Review the latest revision.",
+                    409,
+                )
+            self._require_current_outreach_record(tx, inc, kind, record)
+            if record["payload_hash"] != payload_hash:
+                raise DomainError(
+                    "PAYLOAD_CHANGED",
+                    "The displayed simulation does not match this revision.",
+                    409,
+                )
+            if epoch(record["expires_at"]) <= self.now(tx):
+                raise DomainError(
+                    "OUTREACH_APPROVAL_EXPIRED",
+                    "The simulation preview expired. Prepare and review a fresh revision.",
+                    409,
+                )
+            request_id, replay = self.begin_outreach_request(
+                tx,
+                principal,
+                action + "_approval",
+                incident_id,
+                idempotency_key,
+                {"record_id": record_id, "payload_hash": payload_hash},
+            )
+            if replay:
+                return replay
+            if record.get("approval_id"):
+                previous = self.require(tx, "outreach_approval", record["approval_id"])
+                self.finish_outreach_request(
+                    tx, request_id, "outreach_approval", previous["id"]
+                )
+                return self.outreach_projection(previous)
+            approval = {
+                "id": ident(),
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "approver_id": principal["user"]["id"],
+                "record_id": record["id"],
+                "payload_hash": payload_hash,
+                "action": action,
+                "status": "APPROVED",
+                "created_at": iso(self.now(tx)),
+                "expires_at": record["expires_at"],
+            }
+            record.update(status="APPROVED", approval_id=approval["id"])
+            tx.put("outreach_approval", approval["id"], approval)
+            tx.put(kind, record["id"], record)
+            self.finish_outreach_request(
+                tx, request_id, "outreach_approval", approval["id"]
+            )
+            self.event(
+                tx,
+                incident_id,
+                "OUTREACH_SIMULATION_APPROVED",
+                "The reporting resident approved an exact internal simulation revision. No outreach occurred.",
+            )
+            return self.outreach_projection(approval)
+
+    def run_email_simulation(self, principal, incident_id, data, idempotency_key=None):
+        self._require_outreach()
+        self.reconcile_outreach_boundary(principal, incident_id)
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            draft = self.require(tx, "outreach_email_draft", data["draft_id"])
+            self._require_current_outreach_record(
+                tx, inc, "outreach_email_draft", draft
+            )
+            if (
+                inc.get("outreach_email_draft_id") != draft["id"]
+                or draft["payload_hash"] != data["payload_hash"]
+                or draft.get("status") not in ("APPROVED", "SIMULATED_NOT_SENT")
+            ):
+                raise DomainError(
+                    "EMAIL_SIMULATION_NOT_APPROVED",
+                    "Approve the current exact email simulation before running it.",
+                    409,
+                )
+            approval = self.require(
+                tx, "outreach_approval", draft.get("approval_id", "")
+            )
+            if (
+                approval["status"] != "APPROVED"
+                or approval["action"] != "simulate_email"
+                or epoch(approval["expires_at"]) <= self.now(tx)
+            ):
+                raise DomainError(
+                    "EMAIL_SIMULATION_NOT_APPROVED",
+                    "The email simulation approval expired or changed.",
+                    409,
+                )
+            request_id, replay = self.begin_outreach_request(
+                tx,
+                principal,
+                "email_simulation",
+                incident_id,
+                idempotency_key,
+                data,
+            )
+            if replay:
+                return replay
+            existing = tx.get("simulation_receipt", draft.get("receipt_id", ""))
+            if existing:
+                self.finish_outreach_request(
+                    tx, request_id, "simulation_receipt", existing["id"]
+                )
+                return self.outreach_projection(existing)
+            receipt_id = uuid.uuid5(
+                uuid.NAMESPACE_URL, f"internal-email-simulator-v1:{approval['id']}"
+            ).hex
+            receipt = {
+                "id": receipt_id,
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "channel": "email",
+                "status": "SIMULATED_NOT_SENT",
+                "execution_target": "internal-email-simulator-v1",
+                "draft_id": draft["id"],
+                "payload_hash": draft["payload_hash"],
+                "subject": draft["subject"],
+                "research_snapshot_id": draft["research_snapshot_id"],
+                "created_at": iso(self.now(tx)),
+                "summary": "Recorded inside Neighborhood Fixer only; no email was sent.",
+            }
+            draft.update(status="SIMULATED_NOT_SENT", receipt_id=receipt_id)
+            inc["outreach_email_receipt_id"] = receipt_id
+            tx.put("outreach_email_draft", draft["id"], draft)
+            tx.put("simulation_receipt", receipt_id, receipt)
+            tx.put("incident", incident_id, inc)
+            self.finish_outreach_request(
+                tx, request_id, "simulation_receipt", receipt_id
+            )
+            self.event(
+                tx,
+                incident_id,
+                "EMAIL_SIMULATION_COMPLETED",
+                "The reporting resident completed an internal email simulation. No email was sent.",
+            )
+            return self.outreach_projection(receipt)
+
+    def create_voice_envelope(self, principal, incident_id, idempotency_key=None):
+        self._require_outreach()
+        self.reconcile_outreach_boundary(principal, incident_id)
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            self.ensure_no_active_voice_run(tx, inc)
+            selection = self._current_selection(tx, inc)
+            contact = selection["contact"]
+            if not contact.get("phone"):
+                raise DomainError(
+                    "PHONE_REFERENCE_UNAVAILABLE",
+                    "The selected official source does not publish a phone number.",
+                    409,
+                )
+            request_id, replay = self.begin_outreach_request(
+                tx,
+                principal,
+                "voice_envelope",
+                incident_id,
+                idempotency_key,
+                {},
+            )
+            if replay:
+                return replay
+            previous = tx.get(
+                "voice_envelope", inc.get("outreach_voice_envelope_id", "")
+            )
+            revision = previous["revision"] + 1 if previous else 1
+            now = self.now(tx)
+            facts = [
+                {
+                    "id": "category",
+                    "label": "Issue category",
+                    "value": CATEGORY_TITLES[inc["category"]],
+                },
+                {
+                    "id": "description",
+                    "label": "Resident-provided description",
+                    "value": " ".join(inc["description"].split())[:160],
+                },
+                {
+                    "id": "location",
+                    "label": "Resident-confirmed location",
+                    "value": " ".join(inc["location_label"].split())[:160],
+                },
+                {
+                    "id": "jurisdiction",
+                    "label": "Confirmed research area",
+                    "value": "Seattle, Washington, US",
+                },
+            ]
+            frozen = {
+                "revision": revision,
+                "facts": facts,
+                "allowed_intents": {
+                    "reporting_agent": [
+                        "report_issue",
+                        "answer_location",
+                        "ask_next_step",
+                    ],
+                    "fictional_intake_agent": [
+                        "request_location",
+                        "acknowledge",
+                        "close",
+                    ],
+                },
+                "refusal_rules": [
+                    "Do not claim a real call, message, ticket, receipt, service promise, or government response.",
+                    "Do not add facts, contact details, severity, ownership, or urgency.",
+                    "The receiving role must identify itself as fictional.",
+                ],
+                "max_turns": 6,
+                "max_duration_seconds": 90,
+                "research_reference": contact,
+                "selected_contact": contact,
+                "research_snapshot_id": selection["id"],
+                "execution_target": "internal-voice-simulator-v1",
+                "context_hash": selection["context_hash"],
+            }
+            envelope = {
+                **frozen,
+                "id": ident(),
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "payload_hash": digest(frozen),
+                "status": "AWAITING_APPROVAL",
+                "variability_notice": "Wording may vary only inside this approved fact and intent envelope.",
+                "created_at": iso(now),
+                "expires_at": iso(now + self.settings.approval_seconds),
+                "request_id": request_id,
+            }
+            self._mark_record_stale(
+                tx, "voice_envelope", inc.get("outreach_voice_envelope_id")
+            )
+            inc["outreach_voice_envelope_id"] = envelope["id"]
+            tx.put("voice_envelope", envelope["id"], envelope)
+            tx.put("incident", incident_id, inc)
+            self.finish_outreach_request(
+                tx, request_id, "voice_envelope", envelope["id"]
+            )
+            self.event(
+                tx,
+                incident_id,
+                "VOICE_SIMULATION_DRAFTED",
+                "A bounded internal voice simulation is awaiting approval; no number was dialed.",
+                tool="outreach.prepare_voice_envelope",
+            )
+            return self.outreach_projection(envelope)
+
+    def approve_voice_envelope(
+        self, principal, incident_id, data, idempotency_key=None
+    ):
+        return self._approve_outreach(
+            principal,
+            incident_id,
+            "voice_envelope",
+            "outreach_voice_envelope_id",
+            data["envelope_id"],
+            data["payload_hash"],
+            "simulate_voice",
+            idempotency_key,
+        )
+
+    def validate_voice_script(self, envelope, result):
+        turns = result.get("turns") if isinstance(result, dict) else None
+        expected = [
+            ("reporting_agent", "report_issue"),
+            ("fictional_intake_agent", "request_location"),
+            ("reporting_agent", "answer_location"),
+            ("fictional_intake_agent", "acknowledge"),
+            ("reporting_agent", "ask_next_step"),
+            ("fictional_intake_agent", "close"),
+        ]
+        if not isinstance(turns, list) or len(turns) != envelope["max_turns"]:
+            raise DomainError(
+                "VOICE_SCRIPT_INVALID",
+                "The voice agents did not produce the approved bounded dialogue.",
+                503,
+                True,
+            )
+        facts = {item["id"]: item["value"] for item in envelope["facts"]}
+        fact_rules = {
+            "report_issue": {"category", "description"},
+            "request_location": set(),
+            "answer_location": {"location", "jurisdiction"},
+            "acknowledge": set(),
+            "ask_next_step": set(),
+            "close": set(),
+        }
+        variants = {
+            "report_issue": {
+                "report_standard": "This internal demo reports {category}. The resident described: {description}",
+                "report_concise": "Resident report for this internal demo: {category}. Description: {description}",
+            },
+            "request_location": {
+                "ask_location_standard": "I am a fictional demo intake agent. What location was approved for this simulation?",
+                "ask_location_brief": "Fictional demo intake agent here. Please provide the approved location.",
+            },
+            "answer_location": {
+                "location_standard": "The resident-confirmed location is {location}. The confirmed research area is {jurisdiction}.",
+                "location_concise": "Approved location: {location}. Confirmed research area: {jurisdiction}.",
+            },
+            "acknowledge": {
+                "acknowledge_standard": "This fictional intake simulation recorded those resident-provided details without contacting an office.",
+                "acknowledge_brief": "The fictional simulation recorded those details internally only.",
+            },
+            "ask_next_step": {
+                "next_step_standard": "What would the next step be in this fictional demonstration?",
+                "next_step_brief": "What is the fictional demonstration's next step?",
+            },
+            "close": {
+                "close_standard": "This internal demonstration is complete. No phone number was dialed and no government response is claimed.",
+                "close_brief": "The internal demo is complete. No number was dialed.",
+            },
+        }
+        total = 0
+        safe = []
+        for turn, required in zip(turns, expected, strict=True):
+            if not isinstance(turn, dict) or set(turn) != {
+                "speaker",
+                "intent",
+                "fact_ids",
+                "variant_id",
+            }:
+                raise DomainError(
+                    "VOICE_SCRIPT_INVALID", "Invalid voice turn.", 503, True
+                )
+            speaker, intent = turn.get("speaker"), turn.get("intent")
+            fact_ids, variant_id = turn.get("fact_ids"), turn.get("variant_id")
+            if (speaker, intent) != required:
+                raise DomainError(
+                    "VOICE_SCRIPT_INVALID", "Invalid voice turn order.", 503, True
+                )
+            if not isinstance(fact_ids, list) or set(fact_ids) != fact_rules[intent]:
+                raise DomainError(
+                    "VOICE_SCRIPT_INVALID",
+                    "Voice turn exceeded approved facts.",
+                    503,
+                    True,
+                )
+            template = variants[intent].get(variant_id)
+            if not template:
+                raise DomainError(
+                    "VOICE_SCRIPT_INVALID",
+                    "Voice agents selected wording outside the approved catalog.",
+                    503,
+                    True,
+                )
+            caption = template.format(**facts)
+            if not 1 <= len(caption) <= 300:
+                raise DomainError(
+                    "VOICE_SCRIPT_INVALID",
+                    "Rendered voice caption is too long.",
+                    503,
+                    True,
+                )
+            total += len(caption)
+            safe.append(
+                {
+                    "id": ident(),
+                    "speaker": speaker,
+                    "intent": intent,
+                    "fact_ids": fact_ids,
+                    "variant_id": variant_id,
+                    "caption": caption,
+                }
+            )
+        if total > 1800:
+            raise DomainError(
+                "VOICE_SCRIPT_INVALID", "Voice script exceeded its limit.", 503, True
+            )
+        return safe
+
+    def _voice_run_projection(self, principal, run):
+        result = self.outreach_projection(run)
+        if (
+            run.get("status") == "RUNNING"
+            and run.get("started_epoch")
+            and time.time() - run["started_epoch"] >= 90
+        ):
+            self.end_voice_simulation(
+                principal, run["incident_id"], run["id"], "expired"
+            )
+            result["status"] = "INTERRUPTED"
+        return result
+
+    def voice_run_status(self, principal, incident_id, run_id, playback_token):
+        self._require_outreach()
+        self.reconcile_outreach_boundary(principal, incident_id)
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            run = self.require(tx, "voice_run", run_id)
+            if run["incident_id"] != incident_id:
+                raise DomainError("NOT_FOUND", "Voice simulation not found.", 404)
+            self.require_playback_token(run, playback_token)
+            result = self.outreach_projection(run)
+            expired = (
+                run.get("status") == "RUNNING"
+                and run.get("started_epoch")
+                and time.time() - run["started_epoch"] >= 90
+            )
+        if expired:
+            self.end_voice_simulation(principal, incident_id, run_id, "expired")
+            return {**result, "status": "INTERRUPTED"}
+        if run.get("status") != "RUNNING":
+            return result
+
+        from . import outreach
+
+        session = outreach.get_voice_session(
+            self.settings,
+            self.store,
+            principal["workspace_id"],
+            run["id"],
+        )
+        if not session:
+            self.end_voice_simulation(principal, incident_id, run_id, "expired")
+            return {**result, "status": "INTERRUPTED"}
+        result["turns"] = [
+            {
+                **turn,
+                "audio_url": (
+                    f"/api/incidents/{run['incident_id']}/outreach/voice/"
+                    f"runs/{run['id']}/turns/{turn['id']}/audio"
+                ),
+            }
+            for turn in session["turns"]
+        ]
+        return result
+
+    def run_voice_simulation(self, principal, incident_id, data, idempotency_key=None):
+        self._require_outreach()
+        self.reconcile_outreach_boundary(principal, incident_id)
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            envelope = self.require(tx, "voice_envelope", data["envelope_id"])
+            self._require_current_outreach_record(tx, inc, "voice_envelope", envelope)
+            if (
+                inc.get("outreach_voice_envelope_id") != envelope["id"]
+                or envelope["payload_hash"] != data["payload_hash"]
+                or envelope.get("status")
+                not in (
+                    "APPROVED",
+                    "GENERATING",
+                    "RUNNING",
+                    "COMPLETED",
+                    "ENDED",
+                    "FAILED",
+                )
+            ):
+                raise DomainError(
+                    "VOICE_SIMULATION_NOT_APPROVED",
+                    "Approve the current voice envelope before starting it.",
+                    409,
+                )
+            approval = self.require(
+                tx, "outreach_approval", envelope.get("approval_id", "")
+            )
+            if (
+                approval["status"] != "APPROVED"
+                or approval["action"] != "simulate_voice"
+                or epoch(approval["expires_at"]) <= self.now(tx)
+            ):
+                raise DomainError(
+                    "VOICE_SIMULATION_NOT_APPROVED",
+                    "The voice simulation approval expired or changed.",
+                    409,
+                )
+            request_id, replay = self.begin_outreach_request(
+                tx,
+                principal,
+                "voice_simulation",
+                incident_id,
+                idempotency_key,
+                data,
+            )
+            if replay:
+                replay_run = tx.get("voice_run", replay.get("id", ""))
+                if replay_run and replay_run.get("status") in (
+                    "GENERATING",
+                    "RUNNING",
+                ):
+                    return self.attach_playback_token(tx, principal, replay_run)
+                return replay
+            existing = tx.get("voice_run", envelope.get("run_id", ""))
+            if existing and existing.get("status") == "FAILED":
+                envelope.update(status="APPROVED")
+                envelope.pop("run_id", None)
+                tx.put("voice_envelope", envelope["id"], envelope)
+                existing = None
+            if existing:
+                self.finish_outreach_request(
+                    tx, request_id, "voice_run", existing["id"]
+                )
+                if existing.get("status") in ("GENERATING", "RUNNING"):
+                    return self.attach_playback_token(tx, principal, existing)
+                return self._voice_run_projection(principal, existing)
+            self.consume_outreach_quota(tx, principal, "voice")
+            run = {
+                "id": ident(),
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "envelope_id": envelope["id"],
+                "payload_hash": envelope["payload_hash"],
+                "research_snapshot_id": envelope["research_snapshot_id"],
+                "status": "GENERATING",
+                "execution_target": "internal-voice-simulator-v1",
+                "created_at": iso(self.now(tx)),
+                "provider_deadline_at": iso(self.now(tx) + 5 * 60),
+            }
+            envelope.update(status="GENERATING", run_id=run["id"])
+            inc["outreach_voice_run_id"] = run["id"]
+            tx.put("voice_envelope", envelope["id"], envelope)
+            tx.put("voice_run", run["id"], run)
+            tx.put("incident", incident_id, inc)
+            self.finish_outreach_request(tx, request_id, "voice_run", run["id"])
+            initial_response = self.attach_playback_token(tx, principal, run)
+            private_envelope = dict(envelope)
+        from . import outreach
+
+        private_envelope.update(
+            workspace_id=principal["workspace_id"], owner_id=principal["user"]["id"]
+        )
+        if self.settings.mode == "aws":
+            try:
+                outreach.dispatch_outreach_worker(
+                    self.settings,
+                    {
+                        "action": "simulate_voice",
+                        "workspace_id": principal["workspace_id"],
+                        "envelope_id": envelope["id"],
+                        "payload_hash": envelope["payload_hash"],
+                    },
+                )
+            except outreach.OutreachProviderError as exc:
+                self.fail_voice_generation(principal["workspace_id"], run["id"])
+                self.fail_outreach_request(principal, request_id)
+                raise DomainError(exc.code, exc.message, 503, exc.retryable) from exc
+            return initial_response
+        turns = None
+        error = None
+        for _ in range(2):
+            try:
+                proposal = outreach.generate_voice_script(
+                    self.settings, private_envelope, principal
+                )
+                turns = self.validate_voice_script(private_envelope, proposal)
+                break
+            except Exception as exc:  # noqa: BLE001 - one bounded regeneration.
+                error = exc
+        if turns is None:
+            self.fail_voice_generation(principal["workspace_id"], run["id"])
+            self.fail_outreach_request(principal, request_id)
+            if isinstance(error, DomainError):
+                raise error
+            raise DomainError(
+                "VOICE_SIMULATION_FAILED",
+                "The internal voice simulation could not be prepared. No number was dialed.",
+                503,
+                True,
+            ) from error
+        try:
+            current = self.complete_voice_generation(
+                principal["workspace_id"], run["id"], turns
+            )
+        except Exception:  # noqa: BLE001 - fail closed and purge transient turns.
+            self.fail_voice_generation(principal["workspace_id"], run["id"])
+            self.fail_outreach_request(principal, request_id)
+            raise
+        return {
+            **self._voice_run_projection(principal, current),
+            "playback_token": initial_response["playback_token"],
+        }
+
+    def fail_voice_generation(self, workspace_id, run_id, claimant_id=None):
+        from . import outreach
+
+        projected = None
+        may_purge = claimant_id is None
+        try:
+            with self.store.atomic(workspace_id) as tx:
+                self.check_admission(tx)
+                current = tx.get("voice_run", run_id)
+                if not current:
+                    return None
+                if claimant_id and current.get("provider_claim_id") != claimant_id:
+                    return self.outreach_projection(current)
+                may_purge = True
+                if current.get("status") == "GENERATING":
+                    incident = self.require(tx, "incident", current["incident_id"])
+                    self.scrub_voice_outcome(tx, incident, current, "FAILED")
+                    self.event(
+                        tx,
+                        current["incident_id"],
+                        "VOICE_SIMULATION_FAILED",
+                        "The internal voice simulation failed before playback. No number was dialed.",
+                    )
+                projected = self.outreach_projection(current)
+        finally:
+            if may_purge:
+                outreach.delete_voice_session(
+                    self.settings, self.store, workspace_id, run_id
+                )
+        return projected
+
+    def complete_voice_generation(self, workspace_id, run_id, turns, claimant_id=None):
+        from . import outreach
+
+        with self.store.atomic(workspace_id) as tx:
+            self.check_admission(tx)
+            current = self.require(tx, "voice_run", run_id)
+            if current.get("status") == "RUNNING":
+                return self.outreach_projection(current)
+            if claimant_id and current.get("provider_claim_id") != claimant_id:
+                raise DomainError(
+                    "VOICE_PROVIDER_CLAIM_LOST",
+                    "Another worker owns this voice generation operation.",
+                    409,
+                )
+            if current.get("status") != "GENERATING":
+                raise DomainError(
+                    "STALE_VOICE_SIMULATION",
+                    "This voice generation is no longer current.",
+                    409,
+                )
+            envelope = self.require(tx, "voice_envelope", current["envelope_id"])
+            incident = self.require(tx, "incident", current["incident_id"])
+            if (
+                envelope.get("status") != "GENERATING"
+                or incident.get("outreach_voice_run_id") != current["id"]
+                or incident.get("outreach_voice_envelope_id") != envelope["id"]
+            ):
+                raise DomainError(
+                    "STALE_VOICE_SIMULATION",
+                    "This voice generation is no longer current.",
+                    409,
+                )
+            if self.now(tx) >= epoch(current["provider_deadline_at"]):
+                raise DomainError(
+                    "VOICE_GENERATION_EXPIRED",
+                    "The voice generation deadline passed before captions were stored.",
+                    409,
+                )
+            owner_id = current["owner_id"]
+        expires_epoch = time.time() + VOICE_SESSION_SECONDS
+        expires_at = iso(expires_epoch)
+        if self.settings.mode == "aws":
+            try:
+                from services.agents.aws_workflow import start_voice_cleanup
+
+                start_voice_cleanup(workspace_id, run_id, expires_at)
+            except Exception as exc:
+                raise DomainError(
+                    "VOICE_CLEANUP_SCHEDULING_FAILED",
+                    "The temporary voice cleanup could not be scheduled, so no captions were stored.",
+                    503,
+                    True,
+                ) from exc
+        outreach.put_voice_session(
+            self.settings,
+            self.store,
+            workspace_id,
+            run_id,
+            {
+                "run_id": run_id,
+                "incident_id": current["incident_id"],
+                "owner_id": owner_id,
+                "turns": turns,
+                "expires_epoch": expires_epoch,
+                "ttl_epoch": time.time() + 15 * 60,
+            },
+        )
+        stale = False
+        projected = None
+        with self.store.atomic(workspace_id) as tx:
+            self.check_admission(tx)
+            current = self.require(tx, "voice_run", run_id)
+            if (
+                current.get("status") != "GENERATING"
+                or (claimant_id and current.get("provider_claim_id") != claimant_id)
+                or self.now(tx) >= epoch(current["provider_deadline_at"])
+            ):
+                stale = True
+            else:
+                current.update(
+                    status="RUNNING",
+                    ready_at=iso(self.now(tx)),
+                    transcript_expires_at=iso(expires_epoch),
+                    turn_count=len(turns),
+                )
+                current.pop("provider_claim_id", None)
+                current.pop("provider_claimed_at", None)
+                current_envelope = self.require(
+                    tx, "voice_envelope", current["envelope_id"]
+                )
+                current_envelope["status"] = "RUNNING"
+                tx.put("voice_run", current["id"], current)
+                tx.put("voice_envelope", current_envelope["id"], current_envelope)
+                self.event(
+                    tx,
+                    current["incident_id"],
+                    "VOICE_SIMULATION_STARTED",
+                    "An internal voice simulation started. No phone number was dialed.",
+                    tool="agent.simulate_voice",
+                    result="Validated bounded internal dialogue; captions were not recorded in activity",
+                )
+                projected = self.outreach_projection(current)
+        if stale:
+            outreach.delete_voice_session(
+                self.settings, self.store, workspace_id, run_id
+            )
+            raise DomainError(
+                "STALE_VOICE_SIMULATION",
+                "This voice generation is no longer current.",
+                409,
+            )
+        return projected
+
+    def voice_turn_audio(self, principal, incident_id, run_id, turn_id, playback_token):
+        self._require_outreach()
+        self.reconcile_outreach_boundary(principal, incident_id)
+        expired = False
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            run = self.require(tx, "voice_run", run_id)
+            if run["incident_id"] != incident_id or run["status"] != "RUNNING":
+                raise DomainError(
+                    "VOICE_SESSION_UNAVAILABLE",
+                    "This temporary voice session is no longer available.",
+                    410,
+                )
+            self.require_playback_token(run, playback_token)
+            if not run.get("started_epoch"):
+                run.update(started_epoch=time.time(), started_at=iso(self.now(tx)))
+                tx.put("voice_run", run["id"], run)
+            expired = time.time() - run["started_epoch"] >= 90
+        if expired:
+            self.end_voice_simulation(principal, incident_id, run_id, "expired")
+            raise DomainError(
+                "VOICE_SESSION_EXPIRED",
+                "The approved demo call reached its 90-second limit.",
+                410,
+            )
+        from . import outreach
+
+        session = outreach.get_voice_session(
+            self.settings, self.store, principal["workspace_id"], run_id
+        )
+        turn = next(
+            (
+                item
+                for item in (session or {}).get("turns", [])
+                if item["id"] == turn_id
+            ),
+            None,
+        )
+        if not turn:
+            raise DomainError(
+                "VOICE_SESSION_UNAVAILABLE",
+                "This temporary voice turn expired and was not retained.",
+                410,
+            )
+        try:
+            outreach.claim_voice_audio(
+                self.settings,
+                self.store,
+                principal["workspace_id"],
+                run_id,
+                turn_id,
+                int(session["expires_epoch"]),
+            )
+            audio_stream, media_type = outreach.synthesize_audio_stream(
+                self.settings, turn["caption"], turn["speaker"]
+            )
+        except outreach.OutreachProviderError as exc:
+            status = 429 if exc.code == "VOICE_AUDIO_LIMIT_REACHED" else 503
+            raise DomainError(exc.code, exc.message, status, exc.retryable) from exc
+
+        def stream_and_mark_served():
+            completed = False
+            deadline_reached = False
+            source = iter(audio_stream)
+            deadline = run["started_epoch"] + 90
+            try:
+                while True:
+                    if time.time() >= deadline:
+                        deadline_reached = True
+                        break
+                    try:
+                        chunk = next(source)
+                    except StopIteration:
+                        completed = True
+                        break
+                    if time.time() >= deadline:
+                        deadline_reached = True
+                        break
+                    yield chunk
+            finally:
+                try:
+                    close = getattr(source, "close", None)
+                    if callable(close):
+                        close()
+                finally:
+                    if deadline_reached:
+                        self.end_voice_simulation(
+                            principal, incident_id, run_id, "expired"
+                        )
+                if completed and not deadline_reached:
+                    with self.authorized(principal) as tx:
+                        current = tx.get("voice_run", run_id)
+                        if current and current.get("status") == "RUNNING":
+                            try:
+                                self.require_playback_token(current, playback_token)
+                            except DomainError:
+                                return
+                            played = list(current.get("played_turn_ids", []))
+                            if turn_id not in played:
+                                played.append(turn_id)
+                                current["played_turn_ids"] = played[:6]
+                                tx.put("voice_run", current["id"], current)
+
+        return stream_and_mark_served(), media_type
+
+    def end_voice_simulation(
+        self,
+        principal,
+        incident_id,
+        run_id,
+        reason,
+        idempotency_key=None,
+    ):
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            run = self.require(tx, "voice_run", run_id)
+            if run["incident_id"] != incident_id:
+                raise DomainError("NOT_FOUND", "Voice simulation not found.", 404)
+            request_id, replay = (None, None)
+            if reason not in ("expired", "stale"):
+                request_id, replay = self.begin_outreach_request(
+                    tx,
+                    principal,
+                    "voice_simulation_end",
+                    incident_id,
+                    idempotency_key,
+                    {"run_id": run_id, "reason": reason},
+                )
+                if replay:
+                    self.scrub_voice_outcome(
+                        tx, inc, run, replay.get("run_status", run["status"])
+                    )
+                    from . import outreach
+
+                    outreach.delete_voice_session(
+                        self.settings,
+                        self.store,
+                        principal["workspace_id"],
+                        run_id,
+                    )
+                    return replay
+            existing = tx.get("simulation_receipt", run.get("receipt_id", ""))
+            if existing:
+                self.scrub_voice_outcome(
+                    tx, inc, run, existing.get("run_status", run["status"])
+                )
+                self.finish_outreach_request(
+                    tx, request_id, "simulation_receipt", existing["id"]
+                )
+                from . import outreach
+
+                outreach.delete_voice_session(
+                    self.settings,
+                    self.store,
+                    principal["workspace_id"],
+                    run_id,
+                )
+                return self.outreach_projection(existing)
+            now = self.now(tx)
+            elapsed = (
+                max(0, time.time() - run["started_epoch"])
+                if run.get("started_epoch")
+                else 0
+            )
+            if elapsed >= 90:
+                reason = "expired"
+            completed = bool(
+                reason == "completed"
+                and run.get("status") == "RUNNING"
+                and run.get("started_epoch")
+                and run.get("turn_count", 0) > 0
+                and len(set(run.get("played_turn_ids", []))) >= run.get("turn_count", 0)
+            )
+            if reason == "completed" and not completed:
+                reason = "resident"
+            run_status = {
+                "completed": "COMPLETED",
+                "resident": "ENDED",
+                "expired": "INTERRUPTED",
+                "stale": "INTERRUPTED",
+            }[reason]
+            receipt = {
+                "id": uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"internal-voice-simulator-v1:{run['id']}"
+                ).hex,
+                "incident_id": incident_id,
+                "owner_id": principal["user"]["id"],
+                "channel": "voice",
+                "status": "SIMULATED_NOT_DIALED",
+                "run_status": run_status,
+                "execution_target": "internal-voice-simulator-v1",
+                "run_id": run["id"],
+                "envelope_id": run["envelope_id"],
+                "payload_hash": run["payload_hash"],
+                "turn_count": run.get("turn_count", 0),
+                "duration_seconds": max(0, min(90, round(elapsed))),
+                "research_snapshot_id": run["research_snapshot_id"],
+                "created_at": iso(now),
+                "summary": "Internal simulation completed; no phone number was dialed. Audio and captions were temporary and were not saved."
+                if run_status == "COMPLETED"
+                else (
+                    "Stopped by resident; no phone number was dialed. Audio and captions were not saved."
+                    if run_status == "ENDED"
+                    else (
+                        "Case facts changed, so the internal demo stopped; no phone number was dialed. Audio and captions were not saved."
+                        if reason == "stale"
+                        else "The internal demo reached its time limit; no phone number was dialed. Audio and captions were not saved."
+                    )
+                ),
+            }
+            run.update(status=run_status, ended_at=iso(now), receipt_id=receipt["id"])
+            inc["outreach_voice_receipt_id"] = receipt["id"]
+            self.scrub_voice_outcome(tx, inc, run, run_status)
+            tx.put("simulation_receipt", receipt["id"], receipt)
+            self.finish_outreach_request(
+                tx, request_id, "simulation_receipt", receipt["id"]
+            )
+            self.event(
+                tx,
+                incident_id,
+                "VOICE_SIMULATION_COMPLETED"
+                if run_status == "COMPLETED"
+                else "VOICE_SIMULATION_ENDED",
+                (
+                    "The reporting resident completed an internal call simulation. No phone number was dialed."
+                    if run_status == "COMPLETED"
+                    else (
+                        "Case facts changed, so the internal call simulation ended. No phone number was dialed."
+                        if reason == "stale"
+                        else "The internal call simulation ended. No phone number was dialed."
+                    )
+                ),
+            )
+        from . import outreach
+
+        outreach.delete_voice_session(
+            self.settings, self.store, principal["workspace_id"], run_id
+        )
+        return self.outreach_projection(receipt)
+
+    def expire_voice_run(self, workspace_id, run_id):
+        """Finalize a scheduled transient-session purge without user admission."""
+
+        with self.store.atomic(workspace_id) as tx:
+            run = tx.get("voice_run", run_id)
+            if not run:
+                return None
+            existing = tx.get("simulation_receipt", run.get("receipt_id", ""))
+            if existing:
+                return self.outreach_projection(existing)
+            if run.get("status") not in ("GENERATING", "RUNNING"):
+                return self.outreach_projection(run)
+            incident = tx.get("incident", run.get("incident_id", ""))
+            if not incident:
+                return None
+            now = self.now(tx)
+            receipt = {
+                "id": uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"internal-voice-simulator-v1:{run['id']}",
+                ).hex,
+                "incident_id": run["incident_id"],
+                "owner_id": run["owner_id"],
+                "channel": "voice",
+                "status": "SIMULATED_NOT_DIALED",
+                "run_status": "INTERRUPTED",
+                "execution_target": "internal-voice-simulator-v1",
+                "run_id": run["id"],
+                "envelope_id": run["envelope_id"],
+                "payload_hash": run["payload_hash"],
+                "turn_count": run.get("turn_count", 0),
+                "duration_seconds": 0,
+                "research_snapshot_id": run["research_snapshot_id"],
+                "created_at": iso(now),
+                "summary": "The temporary internal demo expired; no phone number was dialed. Audio and captions were not saved.",
+            }
+            run.update(
+                status="INTERRUPTED", ended_at=iso(now), receipt_id=receipt["id"]
+            )
+            incident["outreach_voice_receipt_id"] = receipt["id"]
+            self.scrub_voice_outcome(tx, incident, run, "INTERRUPTED")
+            tx.put("simulation_receipt", receipt["id"], receipt)
+            self.event(
+                tx,
+                run["incident_id"],
+                "VOICE_SIMULATION_ENDED",
+                "The temporary internal call simulation expired. No phone number was dialed.",
+            )
+            return self.outreach_projection(receipt)
+
+    def outreach_snapshot(self, principal, incident_id):
+        active_run_id = self.reconcile_outreach_context(principal, incident_id)
+        if active_run_id:
+            self.end_voice_simulation(principal, incident_id, active_run_id, "stale")
+            self.reconcile_outreach_context(principal, incident_id)
+        timed_out_run_id = None
+        with self.authorized(principal) as tx:
+            inc = self.require(tx, "incident", incident_id)
+            self.owner(inc, principal)
+            available, reason = self.outreach_eligibility(tx, inc)
+            provider_ready = self.settings.mode == "local" or bool(
+                self.settings.outreach_enabled
+                and self.settings.contact_research_function
+            )
+            if available and not provider_ready:
+                available = False
+                reason = (
+                    "Official contact research is not configured for this deployment."
+                )
+            result = {
+                "available": available,
+                "disabled_reason": reason,
+                "voice_available": available
+                and (
+                    self.settings.mode == "local"
+                    or bool(
+                        self.settings.voice_transcripts_table
+                        and self.settings.outreach_provider_function
+                    )
+                ),
+            }
+            current_research = tx.get(
+                "contact_research", inc.get("outreach_contact_research_id", "")
+            )
+            if current_research:
+                if current_research.get("status") == "PENDING" and epoch(
+                    current_research["provider_deadline_at"]
+                ) <= self.now(tx):
+                    current_research.update(status="FAILED", provider="unavailable")
+                    tx.put("contact_research", current_research["id"], current_research)
+                    self.event(
+                        tx,
+                        incident_id,
+                        "CONTACT_RESEARCH_FAILED",
+                        "Contact research timed out. No outreach occurred.",
+                    )
+                elif current_research.get("status") == "READY" and epoch(
+                    current_research["expires_at"]
+                ) <= self.now(tx):
+                    self.scrub_contact_research(tx, current_research["id"], "EXPIRED")
+            current_run = tx.get("voice_run", inc.get("outreach_voice_run_id", ""))
+            if (
+                current_run
+                and current_run.get("status") == "GENERATING"
+                and epoch(current_run["provider_deadline_at"]) <= self.now(tx)
+            ):
+                timed_out_run_id = current_run["id"]
+                self.scrub_voice_outcome(tx, inc, current_run, "FAILED")
+                self.event(
+                    tx,
+                    incident_id,
+                    "VOICE_SIMULATION_FAILED",
+                    "Voice generation timed out before playback. No number was dialed.",
+                )
+            pointers = {
+                "jurisdiction": ("jurisdiction_candidate", "outreach_jurisdiction_id"),
+                "research": ("contact_research", "outreach_contact_research_id"),
+                "selection": ("contact_selection", "outreach_contact_selection_id"),
+                "email_draft": ("outreach_email_draft", "outreach_email_draft_id"),
+                "email_receipt": ("simulation_receipt", "outreach_email_receipt_id"),
+                "voice_envelope": ("voice_envelope", "outreach_voice_envelope_id"),
+                "voice_run": ("voice_run", "outreach_voice_run_id"),
+                "voice_receipt": ("simulation_receipt", "outreach_voice_receipt_id"),
+            }
+            current_selection = tx.get(
+                "contact_selection",
+                inc.get("outreach_contact_selection_id", ""),
+            )
+            voice_run = None
+            for name, (kind, pointer) in pointers.items():
+                record = tx.get(kind, inc.get(pointer, ""))
+                if (
+                    name == "jurisdiction"
+                    and record
+                    and (
+                        record.get("status") in ("PENDING", "FAILED")
+                        or not all(
+                            field in record
+                            for field in (
+                                "display_name",
+                                "locality",
+                                "municipality",
+                                "region",
+                                "country_code",
+                                "label",
+                                "supported",
+                                "provider",
+                            )
+                        )
+                    )
+                ):
+                    record = None
+                if name == "research" and record:
+                    result[name] = self.contact_research_projection(
+                        tx, record, current_selection
+                    )
+                else:
+                    result[name] = self.outreach_projection(record)
+                if name == "voice_run":
+                    voice_run = record
+        if timed_out_run_id:
+            from . import outreach
+
+            outreach.delete_voice_session(
+                self.settings,
+                self.store,
+                principal["workspace_id"],
+                timed_out_run_id,
+            )
+        if voice_run:
+            result["voice_run"] = self._voice_run_projection(principal, voice_run)
+        return result
+
     def make_draft(self, tx, inc, principal, data):
         if inc["submission_status"] in RESERVED:
             raise DomainError(
@@ -1609,10 +3923,10 @@ class Domain(Policy):
 
     async def execute_submission(self, workspace_id, job):
         from services.worker.browser import (
-            submit_report,
-            OutcomeUnknown,
-            HandoffRequired,
             FailedBeforeSubmission,
+            HandoffRequired,
+            OutcomeUnknown,
+            submit_report,
         )
 
         with self.job_transaction(workspace_id, job) as tx:

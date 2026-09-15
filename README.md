@@ -76,4 +76,4 @@ The domain is the authority for permissions, material revisions, submission rese
 
 [Architecture Mermaid source](docs/architecture.mmd) · [Security and limitations](docs/SECURITY.md) · [Submission draft](docs/DEVPOST-DRAFT.md) · [Disclosure](docs/DISCLOSURE.md) · [MIT license](LICENSE)
 
-The implementation and dependency lockfiles are retained in Git. No pull request, hackathon registration, or hackathon submission was performed by this build.
+The implementation and dependency lockfiles are retained in Git. Hackathon publication and final entry remained participant-controlled. See the [public Devpost project](https://devpost.com/software/neighborhood-fixer), [3:28 demo video](https://youtu.be/vaL5yUI5OX4), and [Agents for Humans builder article](https://builder.aws.com/content/3JLAVwZgbosiNNnNvPP6zYOoVej/agents-for-humans-building-neighborhood-fixer-on-aws).

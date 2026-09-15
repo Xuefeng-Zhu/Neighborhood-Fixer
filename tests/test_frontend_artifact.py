@@ -19,6 +19,7 @@ from scripts.build_amplify_artifact import (
 OUTPUTS = {
     "WebUrl": "https://main.example.amplifyapp.com",
     "ApiUrl": "https://example.execute-api.us-west-2.amazonaws.com",
+    "AudioApiUrl": "https://audio.execute-api.us-west-2.amazonaws.com/audio/",
     "ClerkIssuerUrl": "https://example.clerk.accounts.dev",
     "ClerkPublishableKey": "pk_test_"
     + base64.urlsafe_b64encode(b"example.clerk.accounts.dev$").decode().rstrip("="),
@@ -59,8 +60,23 @@ def test_sets_exact_callback_and_requires_restricted_key_and_deployed_origins():
     assert frontend["VITE_CLERK_PUBLISHABLE_KEY"] == OUTPUTS["ClerkPublishableKey"]
     assert not any("COGNITO" in name for name in frontend)
     assert frontend["VITE_AWS_REGION"] == "us-west-2"
+    assert frontend["VITE_AUDIO_API_BASE_URL"] == OUTPUTS["AudioApiUrl"].rstrip("/")
     with pytest.raises(BuildError, match="NF_LOCATION_API_KEY"):
         frontend_environment(OUTPUTS, {"AWS_REGION": "us-west-2"})
+    with pytest.raises(BuildError, match="AudioApiUrl"):
+        frontend_environment(
+            {key: value for key, value in OUTPUTS.items() if key != "AudioApiUrl"},
+            PUBLIC_ENV,
+        )
+    for url in (
+        "http://audio.example.com/audio",
+        "https://audio.example.com/audio?token=secret",
+        "https://user@audio.example.com/audio",
+        "https://audio.example.com/audio/../buffered",
+    ):
+        with pytest.raises(BuildError) as error:
+            frontend_environment({**OUTPUTS, "AudioApiUrl": url}, PUBLIC_ENV)
+        assert "secret" not in str(error.value)
     for url in (
         "http://localhost:5173",
         "https://localhost",
@@ -127,6 +143,7 @@ def test_main_keeps_aws_secrets_out_of_build_process_and_map_key_out_of_manifest
     monkeypatch.setenv("CLERK_SECRET_KEY", "clerk-secret-placeholder")
     monkeypatch.setenv("NF_AWS_SMOKE_PASSWORD", "account-secret-placeholder")
     monkeypatch.setenv("VITE_API_BASE_URL", "https://wrong.example.com")
+    monkeypatch.setenv("VITE_AUDIO_API_BASE_URL", "https://wrong-audio.example.com")
     calls = []
     monkeypatch.setattr(
         "scripts.build_amplify_artifact.build_command",
@@ -135,6 +152,7 @@ def test_main_keeps_aws_secrets_out_of_build_process_and_map_key_out_of_manifest
     destination = tmp_path / "artifact/frontend.zip"
     assert main(["--outputs", str(source), "--output", str(destination)]) == 0
     assert calls[0]["VITE_API_BASE_URL"] == OUTPUTS["ApiUrl"]
+    assert calls[0]["VITE_AUDIO_API_BASE_URL"] == OUTPUTS["AudioApiUrl"].rstrip("/")
     assert calls[0]["VITE_LOCATION_API_KEY"] == PUBLIC_ENV["NF_LOCATION_API_KEY"]
     assert "AWS_SECRET_ACCESS_KEY" not in calls[0]
     assert "NF_AWS_SMOKE_PASSWORD" not in calls[0]
